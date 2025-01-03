@@ -10,12 +10,15 @@ pub mod dist;
 pub mod prelude;
 
 lazy_static! {
-    static ref LOG: u64 = init_log();
+    static ref LOG: u64 = {
+        let res = init_log();
+        res
+    };
 }
 
 // install a logger facility
 fn init_log() -> u64 {
     Builder::from_default_env().init();
     println!("\n ************** initializing logger *****************\n");
-    1
+    return 1;
 }

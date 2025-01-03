@@ -7,7 +7,7 @@ use super::distsimd::*;
 
 #[cfg(feature = "simdeez_f")]
 use super::disteez::*;
-
+use std::arch::x86_64::*;
 /// The trait describing distance.
 /// For example for the L1 distance
 ///
@@ -24,6 +24,13 @@ use std::os::raw::*;
 
 use num_traits::float::*;
 
+/// for DistUniFrac
+use anyhow::{anyhow, Result};
+use phylotree::tree::Tree;
+use std::collections::HashMap;
+use log::{debug, info};
+use env_logger::Env;
+
 #[allow(unused)]
 enum DistKind {
     DistL1(String),
@@ -36,6 +43,8 @@ enum DistKind {
     DistHellinger(String),
     DistJeffreys(String),
     DistJensenShannon(String),
+    /// UniFrac distance 
+    DistUniFrac(String),
     /// To store a distance defined by a C pointer function
     DistCFnPtr,
     /// Distance defined by a closure
@@ -110,7 +119,7 @@ impl Distance<f32> for DistL1 {
             distance_l1_f32_simd(va,vb)
         }
         else {
-            va.iter().zip(vb.iter()).map(|t| (*t.0 - *t.1 ).abs()).sum()
+            va.iter().zip(vb.iter()).map(|t| (*t.0 as f32- *t.1 as f32).abs()).sum()
         }
         } // end cfg_if
     } // end of eval
@@ -149,10 +158,10 @@ fn scalar_l2_f32(va: &[f32], vb: &[f32]) -> f32 {
     let norm: f32 = va
         .iter()
         .zip(vb.iter())
-        .map(|t| (*t.0 - *t.1) * (*t.0 - *t.1))
+        .map(|t| (*t.0 as f32 - *t.1 as f32) * (*t.0 as f32 - *t.1 as f32))
         .sum();
     assert!(norm >= 0.);
-    norm.sqrt()
+    return norm.sqrt();
 }
 
 impl Distance<f32> for DistL2 {
@@ -173,7 +182,8 @@ impl Distance<f32> for DistL2 {
                 return distance_l2_f32_simd(va, vb);
             }
             else {
-                scalar_l2_f32(va, vb)
+                let norm = scalar_l2_f32(&va, &vb);
+                return norm;
             }
         }
     } // end of eval
@@ -258,7 +268,7 @@ fn scalar_dot_f32(va: &[f32], vb: &[f32]) -> f32 {
     let dot = 1.
         - va.iter()
             .zip(vb.iter())
-            .map(|t| (*t.0 * *t.1))
+            .map(|t| (*t.0 * *t.1) as f32)
             .fold(0., |acc, t| (acc + t));
     assert!(dot >= 0.);
     dot
@@ -284,17 +294,17 @@ impl Distance<f32> for DistDot {
                 return distance_dot_f32_simd_iter(va,vb);
             }
             else {
-                scalar_dot_f32(va, vb)
+                return scalar_dot_f32(va, vb);
             }
         }
     } // end of eval
 }
 
 pub fn l2_normalize(va: &mut [f32]) {
-    let l2norm = va.iter().map(|t| (*t * *t)).sum::<f32>().sqrt();
+    let l2norm = va.iter().map(|t| (*t * *t) as f32).sum::<f32>().sqrt();
     if l2norm > 0. {
-        for v in va {
-            *v /= l2norm;
+        for i in 0..va.len() {
+            va[i] = va[i] / l2norm;
         }
     }
 }
@@ -348,7 +358,7 @@ impl Distance<f32> for DistHellinger {
         let mut dist = va
             .iter()
             .zip(vb.iter())
-            .map(|t| ((*t.0) * (*t.1)).sqrt())
+            .map(|t| ((*t.0).sqrt() * (*t.1).sqrt()) as f32)
             .fold(0., |acc, t| (acc + t));
         // if too far away from >= panic else reset!
         assert!(1. - dist >= -0.000001);
@@ -410,7 +420,7 @@ impl Distance<f32> for DistJeffreys {
         let dist = va
             .iter()
             .zip(vb.iter())
-            .map(|t| (*t.0 - *t.1) * ((*t.0).max(M_MIN) / (*t.1).max(M_MIN)).ln())
+            .map(|t| (*t.0 - *t.1) * ((*t.0).max(M_MIN) / (*t.1).max(M_MIN)).ln() as f32)
             .fold(0., |acc, t| (acc + t));
         dist
     } // end of eval
@@ -626,7 +636,12 @@ impl Distance<u16> for DistLevenshtein {
 
         let mut pre;
         let mut tmp;
-        let mut cur: Vec<usize> = (0..len_b).collect();
+        let mut cur = vec![0; len_b];
+
+        // initialize string b
+        for i in 1..len_b {
+            cur[i] = i;
+        }
 
         // calculate edit distance
         for (i, ca) in a.iter().enumerate() {
@@ -648,8 +663,438 @@ impl Distance<u16> for DistLevenshtein {
                 pre = tmp;
             }
         }
-        cur[len_b - 1] as f32
+        let res = cur[len_b - 1] as f32;
+        return res;
     }
+}
+
+
+/// DistUniFrac
+#[derive(Default, Clone)]
+pub struct DistUniFrac {
+    /// Weighted or unweighted
+    weighted: bool,
+    /// tint[i] = parent of node i
+    tint: Vec<usize>,
+    /// lint[i] = length of edge from node i up to tint[i]
+    lint: Vec<f32>,
+    /// Postorder nodes
+    nodes_in_order: Vec<usize>,
+    /// node_name_map[node_in_order_idx] = Some("T4") or whatever
+    node_name_map: Vec<Option<String>>,
+    /// leaf_map: "T4" -> postorder index
+    leaf_map: HashMap<String, usize>,
+    /// total tree length (not used to normalize in this example)
+    total_tree_length: f32,
+    /// Feature names in the same order as va,vb
+    feature_names: Vec<String>,
+}
+
+impl DistUniFrac {
+    /// Build DistUniFrac from the given `newick_str` (no re-root),
+    /// a boolean `weighted` for Weighted or Unweighted, plus your feature names.
+    ///
+    /// *Important*: We do not compress or re-root the tree. This ensures T4's path
+    pub fn new(
+        newick_str: &str,
+        weighted: bool,
+        feature_names: Vec<String>,
+    ) -> Result<Self> {
+        // Parse the tree from the Newick string
+        let tree = Tree::from_newick(newick_str)?;
+
+        // Build arrays (same approach as your old code)
+        let (tint, lint, nodes_in_order, node_name_map) = build_tint_lint(&tree)?;
+
+        let leaf_map = build_leaf_map(&tree, &node_name_map)?;
+
+        let total_tree_length: f32 = lint.iter().sum();
+
+        Ok(Self {
+            weighted,
+            tint,
+            lint,
+            nodes_in_order,
+            node_name_map,
+            leaf_map,
+            total_tree_length,
+            feature_names,
+        })
+    }
+}
+
+/// Implement the Distance<f32> trait
+impl Distance<f32> for DistUniFrac {
+    fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
+        debug!(
+            "DistUniFrac eval called: weighted={}, #features={}",
+            self.weighted,
+            self.feature_names.len()
+        );
+        if self.weighted {
+            compute_unifrac_for_pair_weighted_bitwise(
+                &self.tint,
+                &self.lint,
+                &self.nodes_in_order,
+                &self.leaf_map,
+                &self.feature_names,
+                va,
+                vb,
+            )
+        } else {
+            compute_unifrac_for_pair_unweighted_bitwise(
+                &self.tint,
+                &self.lint,
+                &self.nodes_in_order,
+                &self.leaf_map,
+                &self.feature_names,
+                va,
+                vb,
+            )
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------//
+//--------------------------------------------------------------------------------------//
+fn build_tint_lint(tree: &Tree) -> Result<(Vec<usize>, Vec<f32>, Vec<usize>, Vec<Option<String>>)> {
+    let root = tree.get_root().map_err(|_| anyhow!("Tree has no root"))?;
+    let postord = tree.postorder(&root)?; 
+    debug!("postord = {:?}", postord);
+    let num_nodes = postord.len();
+
+    // node_id -> postorder index
+    let mut pos_map = vec![0; tree.size()];
+    for (i, &nid) in postord.iter().enumerate() {
+        pos_map[nid] = i;
+    }
+
+    let mut tint = vec![0; num_nodes];
+    let mut lint = vec![0.0; num_nodes];
+    let mut node_name_map = vec![None; num_nodes];
+
+    // Mark the root as its own ancestor
+    let root_idx = pos_map[root];
+    tint[root_idx] = root_idx;
+    lint[root_idx] = 0.0;
+
+    // Fill in parent/edge arrays
+    for &nid in &postord {
+        let node = tree.get(&nid)?;
+        if let Some(name) = &node.name {
+            node_name_map[pos_map[nid]] = Some(name.clone());
+        }
+        if nid != root {
+            let p = node.parent.ok_or_else(|| anyhow!("Node has no parent but is not root"))?;
+            tint[pos_map[nid]] = pos_map[p];
+            lint[pos_map[nid]] = node.parent_edge.unwrap_or(0.0) as f32;
+        }
+    }
+    Ok((tint, lint, postord, node_name_map))
+}
+
+fn build_leaf_map(
+    tree: &Tree,
+    node_name_map: &[Option<String>],
+) -> Result<HashMap<String, usize>> {
+    let root = tree.get_root().map_err(|_| anyhow!("Tree has no root"))?;
+    let postord = tree.postorder(&root)?;
+    debug!("postord = {:?}", postord);
+    let mut pos_map = vec![0; tree.size()];
+    for (i, &nid) in postord.iter().enumerate() {
+        pos_map[nid] = i;
+    }
+
+    let mut leaf_map = HashMap::new();
+    for l in tree.get_leaves() {
+        let node = tree.get(&l)?;
+        if node.is_tip() {
+            if let Some(name) = &node.name {
+                let idx = pos_map[l];
+                debug!("   => recognized tip='{}', postord_idx={}", name, idx);
+                leaf_map.insert(name.clone(), idx);
+            }
+        }
+    }
+    Ok(leaf_map)
+}
+
+/// Build a bitmask for data[i] > 0.0 using AVX2 intrinsics. 
+/// # Safety
+/// - This function is marked `unsafe` because it uses `target_feature(enable = "avx2")` 
+///   and raw pointer arithmetic.
+/// - The caller must ensure the CPU supports AVX2.
+/// 
+/// # Parameters
+/// - `data`: slice of f32 values (length can be very large).
+/// # Returns
+/// - A `Vec<u64>` with `(data.len() + 63) / 64` elements.
+///   Each bit in the `u64` corresponds to one element in `data`,
+///   set if `data[i] > 0.0`.
+#[target_feature(enable = "avx2")]
+pub unsafe fn make_presence_mask_f32_avx2(data: &[f32]) -> Vec<u64> {
+    let len = data.len();
+    let num_chunks = (len + 63) / 64;
+    let mut mask = vec![0u64; num_chunks];
+    // We'll process 8 floats at a time (AVX2 = 256 bits).
+    const STRIDE: usize = 8;
+    let blocks = len / STRIDE;
+    let remainder = len % STRIDE;
+    let ptr = data.as_ptr();
+    // For each block of 8 floats
+    for blk_idx in 0..blocks {
+        let offset = blk_idx * STRIDE;
+        // Load 8 consecutive f32 values
+        // _mm256_loadu_ps => unaligned load is usually fine on modern x86
+        let v = _mm256_loadu_ps(ptr.add(offset));
+        // Compare each float in `v` to 0.0 => result bits set to 1 if > 0.0
+        let gt_mask = _mm256_cmp_ps(v, _mm256_set1_ps(0.0), _CMP_GT_OQ);
+        // `_mm256_movemask_ps` extracts the top bit of each float comparison 
+        // into an 8-bit integer: 1 bit per float, 0..7
+        let bitmask = _mm256_movemask_ps(gt_mask) as u32; // 8 bits used
+
+        // Now we need to place each bit into the appropriate position in `mask`.
+        // The i-th bit in `bitmask` corresponds to data[offset + i].
+        // So for i in 0..8, if that bit is set, set the corresponding bit in `mask`.
+        if bitmask == 0 {
+            // No bits set in this block => skip
+            continue;
+        }
+        for i in 0..STRIDE {
+            let global_idx = offset + i;
+            // Check if bit i is set
+            if (bitmask & (1 << i)) != 0 {
+                let chunk_idx = global_idx / 64;
+                let bit_idx   = global_idx % 64;
+                mask[chunk_idx] |= 1 << bit_idx;
+            }
+        }
+    }
+    // Handle any leftover floats at the tail
+    let tail_start = blocks * STRIDE;
+    if remainder > 0 {
+        for i in tail_start..(tail_start + remainder) {
+            if *data.get_unchecked(i) > 0.0 {
+                let chunk_idx = i / 64;
+                let bit_idx   = i % 64;
+                mask[chunk_idx] |= 1 << bit_idx;
+            }
+        }
+    }
+    mask
+}
+
+/// Fallback scalar version, for reference.
+fn make_presence_mask_f32_scalar(data: &[f32]) -> Vec<u64> {
+    let num_chunks = (data.len() + 63) / 64;
+    let mut mask = vec![0u64; num_chunks];
+    for (i, &val) in data.iter().enumerate() {
+        if val > 0.0 {
+            let chunk_idx = i / 64;
+            let bit_idx = i % 64;
+            mask[chunk_idx] |= 1 << bit_idx;
+        }
+    }
+    mask
+}
+
+fn make_presence_mask_f32(data: &[f32]) -> Vec<u64> {
+    if is_x86_feature_detected!("avx2") {
+        unsafe { make_presence_mask_f32_avx2(data) }
+    } else {
+        make_presence_mask_f32_scalar(data)
+    }
+}
+
+fn or_masks(a: &[u64], b: &[u64]) -> Vec<u64> {
+    a.iter().zip(b.iter()).map(|(x, y)| x | y).collect()
+}
+
+fn extract_set_bits(m: &[u64]) -> Vec<usize> {
+    let mut indices = Vec::new();
+    for (chunk_idx, &chunk) in m.iter().enumerate() {
+        if chunk == 0 {
+            continue;
+        }
+        let base = chunk_idx * 64;
+        let mut c = chunk;
+        while c != 0 {
+            let bit_index = c.trailing_zeros() as usize;
+            indices.push(base + bit_index);
+            c &= !(1 << bit_index);
+        }
+    }
+    indices
+}
+
+//--------------------------------------------------------------------------------------//
+//  Bitwise skip-zero logic for unweighted
+//--------------------------------------------------------------------------------------//
+
+fn compute_unifrac_for_pair_unweighted_bitwise(
+    tint: &[usize],
+    lint: &[f32],
+    nodes_in_order: &[usize],
+    leaf_map: &HashMap<String, usize>,
+    feature_names: &[String],
+    va: &[f32],
+    vb: &[f32],
+) -> f32 {
+    debug!("=== compute_unifrac_for_pair_unweighted_bitwise ===");
+    let num_nodes = nodes_in_order.len();
+    let mut partial_sums = vec![0.0; num_nodes];
+
+    // 1) Build presence masks for va, vb
+    let mask_a = make_presence_mask_f32(va);
+    let mask_b = make_presence_mask_f32(vb);
+
+    // 2) Combine => find non-zero indices
+    let combined = or_masks(&mask_a, &mask_b);
+    let non_zero_indices = extract_set_bits(&combined);
+    debug!("non_zero_indices = {:?}", non_zero_indices);
+
+    // 3) Create local arrays
+    let mut local_a = Vec::with_capacity(non_zero_indices.len());
+    let mut local_b = Vec::with_capacity(non_zero_indices.len());
+    let mut local_feats = Vec::with_capacity(non_zero_indices.len());
+
+    for &idx in &non_zero_indices {
+        local_a.push(va[idx]);
+        local_b.push(vb[idx]);
+        local_feats.push(&feature_names[idx]);
+    }
+
+    // 4) Convert to presence/absence, then sum
+    let mut sum_a = 0.0;
+    let mut sum_b = 0.0;
+    for i in 0..local_a.len() {
+        if local_a[i] > 0.0 {
+            local_a[i] = 1.0;
+            sum_a += 1.0;
+        } else {
+            local_a[i] = 0.0;
+        }
+        if local_b[i] > 0.0 {
+            local_b[i] = 1.0;
+            sum_b += 1.0;
+        } else {
+            local_b[i] = 0.0;
+        }
+    }
+    // Normalize each sample
+    if sum_a > 0.0 {
+        let inv_a = 1.0 / sum_a;
+        for x in local_a.iter_mut() {
+            *x *= inv_a;
+        }
+    }
+    if sum_b > 0.0 {
+        let inv_b = 1.0 / sum_b;
+        for x in local_b.iter_mut() {
+            *x *= inv_b;
+        }
+    }
+
+    // 5) partial sums => difference
+    for (i, feat_name) in local_feats.iter().enumerate() {
+        if let Some(&leaf_idx) = leaf_map.get(*feat_name) {
+            let diff = local_a[i] - local_b[i];
+            if diff.abs() > 1e-12 {
+                partial_sums[leaf_idx] = diff;
+                debug!(
+                    "  => partial_sums[leaf_idx={}] = {} for feat='{}'",
+                    leaf_idx, diff, feat_name
+                );
+            }
+        }
+    }
+
+    // 6) Propagate partial sums up the chain
+    let mut dist = 0.0;
+    for i in 0..(num_nodes - 1) {
+        let val = partial_sums[i];
+        partial_sums[tint[i]] += val;
+        dist += lint[i] * val.abs();
+    }
+    debug!("Final unweighted dist={}", dist);
+    dist
+}
+
+//--------------------------------------------------------------------------------------//
+//  Bitwise skip-zero logic for weighted
+//--------------------------------------------------------------------------------------//
+
+fn compute_unifrac_for_pair_weighted_bitwise(
+    tint: &[usize],
+    lint: &[f32],
+    nodes_in_order: &[usize],
+    leaf_map: &HashMap<String, usize>,
+    feature_names: &[String],
+    va: &[f32],
+    vb: &[f32],
+) -> f32 {
+    debug!("=== compute_unifrac_for_pair_weighted_bitwise ===");
+    let num_nodes = nodes_in_order.len();
+    let mut partial_sums = vec![0.0; num_nodes];
+
+    // 1) presence masks
+    let mask_a = make_presence_mask_f32(va);
+    let mask_b = make_presence_mask_f32(vb);
+
+    // 2) combine
+    let combined = or_masks(&mask_a, &mask_b);
+    let non_zero_indices = extract_set_bits(&combined);
+    debug!("non_zero_indices = {:?}", non_zero_indices);
+
+    // 3) build local arrays
+    let mut local_a = Vec::with_capacity(non_zero_indices.len());
+    let mut local_b = Vec::with_capacity(non_zero_indices.len());
+    let mut local_feats = Vec::with_capacity(non_zero_indices.len());
+    for &idx in &non_zero_indices {
+        local_a.push(va[idx]);
+        local_b.push(vb[idx]);
+        local_feats.push(&feature_names[idx]);
+    }
+
+    // 4) sum & normalize
+    let sum_a: f32 = local_a.iter().sum();
+    if sum_a > 0.0 {
+        let inv_a = 1.0 / sum_a;
+        for x in local_a.iter_mut() {
+            *x *= inv_a;
+        }
+    }
+    let sum_b: f32 = local_b.iter().sum();
+    if sum_b > 0.0 {
+        let inv_b = 1.0 / sum_b;
+        for x in local_b.iter_mut() {
+            *x *= inv_b;
+        }
+    }
+
+    // 5) partial sums => diff
+    for (i, feat_name) in local_feats.iter().enumerate() {
+        if let Some(&leaf_idx) = leaf_map.get(*feat_name) {
+            let diff = local_a[i] - local_b[i];
+            if diff.abs() > 1e-12 {
+                partial_sums[leaf_idx] = diff;
+                debug!(
+                    "   => partial_sums[leaf_idx={}] = {} for feat='{}'",
+                    leaf_idx, diff, feat_name
+                );
+            }
+        }
+    }
+
+    // 6) propagate partial sums
+    let mut dist = 0.0;
+    for i in 0..(num_nodes - 1) {
+        let val = partial_sums[i];
+        partial_sums[tint[i]] += val;
+        dist += lint[i] * val.abs();
+    }
+    debug!("Final weighted dist={}", dist);
+    dist
 }
 
 //=======================================================================================
@@ -700,12 +1145,10 @@ impl<T: Copy + Clone + Sized + Send + Sync> Distance<T> for DistCFFI<T> {
 //========================================================================================================
 
 /// This structure is to let user define their own distance with closures.
-#[allow(clippy::type_complexity)]
 pub struct DistFn<T: Copy + Clone + Sized + Send + Sync> {
     dist_function: Box<dyn Fn(&[T], &[T]) -> f32 + Send + Sync>,
 }
 
-#[allow(clippy::type_complexity)]
 impl<T: Copy + Clone + Sized + Send + Sync> DistFn<T> {
     /// construction of a DistFn
     pub fn new(f: Box<dyn Fn(&[T], &[T]) -> f32 + Send + Sync>) -> Self {
@@ -750,12 +1193,14 @@ impl<T: Copy + Clone + Sized + Send + Sync, F: Float> Distance<T> for DistPtr<T,
 
 mod tests {
     use super::*;
+    use log::debug;
+    use env_logger::Env;
 
     fn init_log() -> u64 {
         let mut builder = env_logger::Builder::from_default_env();
         let _ = builder.is_test(true).try_init();
         println!("\n ************** initializing logger *****************\n");
-        1
+        return 1;
     }
 
     #[test]
@@ -766,12 +1211,12 @@ mod tests {
         let v2: Vec<i32> = vec![2, 2, 3];
 
         let d1 = Distance::eval(&distl1, &v1, &v2);
-        assert_eq!(d1, 1_f32);
+        assert_eq!(d1, 1 as f32);
 
         let v3: Vec<f32> = vec![1., 2., 3.];
         let v4: Vec<f32> = vec![2., 2., 3.];
         let d2 = distl1.eval(&v3, &v4);
-        assert_eq!(d2, 1_f32);
+        assert_eq!(d2, 1 as f32);
     }
 
     #[test]
@@ -818,7 +1263,7 @@ mod tests {
         let v2: Vec<i32> = vec![2, 1, -1];
 
         let d1 = Distance::eval(&distcos, &v1, &v2);
-        assert_eq!(d1, 1_f32);
+        assert_eq!(d1, 1. as f32);
         //
         let v1: Vec<f32> = vec![1.234, -1.678, 1.367];
         let v2: Vec<f32> = vec![4.234, -6.678, 10.367];
@@ -873,7 +1318,7 @@ mod tests {
         let dist_check = va
             .iter()
             .zip(vb.iter())
-            .map(|t| (*t.0 - *t.1).abs())
+            .map(|t| (*t.0 as f32 - *t.1 as f32).abs())
             .sum::<f32>();
         //
         log::info!(" dist : {:.5e} dist_check : {:.5e}", dist, dist_check);
@@ -943,7 +1388,7 @@ mod tests {
 
     fn test_my_closure() {
         //        use hnsw_rs::dist::Distance;
-        let weight = [0.1, 0.8, 0.1];
+        let weight = vec![0.1, 0.8, 0.1];
         let my_fn = move |va: &[f32], vb: &[f32]| -> f32 {
             // should check that we work with same size for va, vb, and weight...
             let mut dist: f32 = 0.;
@@ -979,8 +1424,8 @@ mod tests {
         let dist = DistHellinger.eval(&p_data, &q_data);
 
         let dist_exact_fn = |n: usize| -> f32 {
-            let d1 = (4. - (6_f32).sqrt() - (2_f32).sqrt()) / n as f32;
-            d1.sqrt() / (2_f32).sqrt()
+            let d1 = (4. - (6 as f32).sqrt() - (2 as f32).sqrt()) / n as f32;
+            d1.sqrt() / (2 as f32).sqrt()
         };
         let dist_exact = dist_exact_fn(length);
         //
@@ -1054,10 +1499,18 @@ mod tests {
         for i in 300..size_test {
             // generer 2 va et vb s des vecteurs<i32> de taille i  avec des valeurs entre -imax et + imax et controler les resultat
             let between = Uniform::<f64>::from(-fmax..fmax);
-            let va: Vec<f64> = (0..i).map(|_| between.sample(&mut rng)).collect();
-            let mut vb: Vec<f64> = (0..i).map(|_| between.sample(&mut rng)).collect();
+            let va: Vec<f64> = (0..i)
+                .into_iter()
+                .map(|_| between.sample(&mut rng))
+                .collect();
+            let mut vb: Vec<f64> = (0..i)
+                .into_iter()
+                .map(|_| between.sample(&mut rng))
+                .collect();
             // reset half of vb to va
-            vb[..(i / 2)].copy_from_slice(&va[..(i / 2)]);
+            for i in 0..i / 2 {
+                vb[i] = va[i];
+            }
 
             let easy_dist: u32 = va
                 .iter()
@@ -1102,10 +1555,18 @@ mod tests {
         for i in 300..size_test {
             // generer 2 va et vb s des vecteurs<i32> de taille i  avec des valeurs entre -imax et + imax et controler les resultat
             let between = Uniform::<f32>::from(-fmax..fmax);
-            let va: Vec<f32> = (0..i).map(|_| between.sample(&mut rng)).collect();
-            let mut vb: Vec<f32> = (0..i).map(|_| between.sample(&mut rng)).collect();
+            let va: Vec<f32> = (0..i)
+                .into_iter()
+                .map(|_| between.sample(&mut rng))
+                .collect();
+            let mut vb: Vec<f32> = (0..i)
+                .into_iter()
+                .map(|_| between.sample(&mut rng))
+                .collect();
             // reset half of vb to va
-            vb[..(i / 2)].copy_from_slice(&va[..(i / 2)]);
+            for i in 0..i / 2 {
+                vb[i] = va[i];
+            }
 
             let easy_dist: u32 = va
                 .iter()
@@ -1156,4 +1617,47 @@ mod tests {
         init_log();
         log::info!("I have activated simdeez");
     } // end of test_feature_simd
+
+    /// Example test using unweighted EMDUniFrac with presence/absence
+    #[test]
+    fn test_unifrac_unweighted() {
+        let _ = env_logger::Builder::from_env(Env::default().default_filter_or("debug"))
+        .is_test(true)
+        .try_init();
+
+        let newick_str = "((T1:0.1,(T2:0.05,T3:0.05):0.02):0.3,(T4:0.2,(T5:0.1,T6:0.15):0.05):0.4);";
+        let feature_names = vec!["T1","T2","T3","T4","T5","T6"]
+            .into_iter().map(|s| s.to_string()).collect();
+        let dist_uni = DistUniFrac::new(newick_str, false, feature_names).unwrap();
+
+        // SampleA: T1=7, T3=5, T4=2 => presence
+        // SampleB: T2=3, T5=4, T6=9 => presence
+        let va = vec![7.0, 0.0, 5.0, 2.0, 0.0, 0.0];
+        let vb = vec![0.0, 3.0, 0.0, 0.0, 0.0, 9.0];
+
+        let d = dist_uni.eval(&va, &vb);
+        println!("Unweighted EMDUniFrac(A,B) = {}", d);
+        // Should be ~0.4833
+        // e.g. assert!((d - 0.4833).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_unifrac_weighted() {
+        let _ = env_logger::Builder::from_env(Env::default().default_filter_or("debug"))
+        .is_test(true)
+        .try_init();
+        let newick_str = "((T1:0.1,(T2:0.05,T3:0.05):0.02):0.3,(T4:0.2,(T5:0.1,T6:0.15):0.05):0.4);";
+        let feature_names = vec!["T1","T2","T3","T4","T5","T6"]
+            .into_iter().map(|s| s.to_string()).collect();
+        let dist_uni = DistUniFrac::new(newick_str, true, feature_names).unwrap();
+
+        // Weighted with same data
+        let va = vec![7.0, 0.0, 5.0, 2.0, 0.0, 0.0];
+        let vb = vec![0.0, 3.0, 0.0, 0.0, 0.0, 9.0];
+
+        let d = dist_uni.eval(&va, &vb);
+        println!("Weighted EMDUniFrac(A,B) = {}", d);
+        // Should be ~0.7279
+        // e.g. assert!((d - 0.7279).abs() < 1e-4);
+    }
 } // end of module tests

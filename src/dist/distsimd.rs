@@ -3,7 +3,7 @@
 //
 // std simd implementations
 //
-use std::simd::{f32x16, u32x16, u64x8};
+use std::simd::{Simd, f32x16, u32x16, u64x8};
 use std::simd::{i32x16, i64x8};
 
 use std::simd::cmp::SimdPartialEq;
@@ -255,7 +255,7 @@ mod tests {
         init_log();
         log::info!("testing test_simd_hamming_u32 with packed_simd_2");
         //
-        let size_test = 500;
+        let size_test = 5000;
         let imax = 3;
         let mut rng = rand::thread_rng();
         for i in 4..size_test {
@@ -270,6 +270,7 @@ mod tests {
                 .map(|_| between.sample(&mut rng))
                 .collect();
             let simd_dist = distance_jaccard_u64_8_simd(&va, &vb);
+            let simd_dist_popcnt = distance_jaccard_u64_8_simd_popcnt(&va, &vb);
 
             let easy_dist: u64 = va
                 .iter()
@@ -283,6 +284,17 @@ mod tests {
             );
             if (easy_dist - simd_dist).abs() > 1.0e-5 {
                 println!(" jsimd = {:?} , jexact = {:?}", simd_dist, easy_dist);
+                println!("va = {:?}", va);
+                println!("vb = {:?}", vb);
+                std::process::exit(1);
+            }
+
+            println!(
+                "test size {:?} simd  exact = {:?} {:?}",
+                i, simd_dist_popcnt, easy_dist
+            );
+            if (easy_dist - simd_dist_popcnt).abs() > 1.0e-5 {
+                println!(" jsimd = {:?} , jexact = {:?}", simd_dist_popcnt, easy_dist);
                 println!("va = {:?}", va);
                 println!("vb = {:?}", vb);
                 std::process::exit(1);
