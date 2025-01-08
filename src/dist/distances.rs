@@ -1156,7 +1156,7 @@ impl<T: Copy + Clone + Sized + Send + Sync> Distance<T> for DistCFFI<T> {
 // -----------------------------------------------------------------------------
 // 1) Reproduce some enums / types from C++ side
 // -----------------------------------------------------------------------------
-/// Mirror of your `compute_status` enum from C++.
+/// Mirror of `compute_status` enum from C++.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ComputeStatus {
@@ -1298,8 +1298,6 @@ pub extern "C" fn dist_unifrac_c(
 // -----------------------------------------------------------------------------
 
 /// Create a DistUniFrac_C context on the heap; returns a pointer.
-/// In a real system, set up `obs_ids` from a Rust `Vec<String>`
-/// by building `CString`s and storing them in a stable array.
 #[no_mangle]
 pub extern "C" fn dist_unifrac_create(
     n_obs: c_uint,
@@ -1332,9 +1330,9 @@ pub extern "C" fn dist_unifrac_destroy(ctx_ptr: *mut DistUniFrac_C) {
     }
 }
 
-// 6) a small wrapper struct implementing your Distance<f32> trait
-//    so you can use dist_unifrac_c as a "distance function pointer."
-/// Type alias for the actual extern "C" function pointer we use.
+// 6) a small wrapper struct implementing Distance<f32> trait
+// so dist_unifrac_c as a "distance function pointer."
+// Type alias for the actual extern "C" function pointer.
 pub type DistUniFracFnPtr = extern "C" fn(
     *const DistUniFrac_C,
     *const f32,
