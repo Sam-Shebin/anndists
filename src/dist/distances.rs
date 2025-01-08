@@ -31,6 +31,12 @@ use std::collections::HashMap;
 use log::{debug, info};
 use env_logger::Env;
 
+// for DistCFnPtr_UniFrac
+use std::os::raw::{c_char, c_double, c_uint, c_ulonglong};
+use std::ffi::CStr;
+use std::slice;
+use std::ptr;
+
 #[allow(unused)]
 enum DistKind {
     DistL1(String),
@@ -47,6 +53,8 @@ enum DistKind {
     DistUniFrac(String),
     /// To store a distance defined by a C pointer function
     DistCFnPtr,
+    /// To store a distance defined by a UniFrac C pointer function, see here: https://github.com/sfiligoi/unifrac-binaries/tree/simple1_250107
+    DistUniFracFnPtr,
     /// Distance defined by a closure
     DistFn,
     /// Distance defined by a fn Rust pointer
@@ -1142,6 +1150,222 @@ impl<T: Copy + Clone + Sized + Send + Sync> Distance<T> for DistCFFI<T> {
     } // end of compute
 } // end of impl block
 
+
+//DistUniFrac_C
+// Demonstration of calling `one_dense_pair_v2t` from Rust with tests
+// -----------------------------------------------------------------------------
+// 1) Reproduce some enums / types from C++ side
+// -----------------------------------------------------------------------------
+/// Mirror of your `compute_status` enum from C++.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ComputeStatus {
+    Okay = 0,
+    UnknownMethod = 1,
+    TreeMissing = 2,
+    TableMissing = 3,
+    TableEmpty = 4,
+    TableAndTreeDoNotOverlap = 5, 
+    OutputError = 6, 
+    InvalidMethod = 7, 
+    GroupingMissing = 8,
+}
+
+/// Opaque BPTree pointer type; the actual structure is in C++.
+#[repr(C)]
+pub struct OpaqueBPTree {
+    _private: [u8; 0], // no fields in Rust
+}
+// 2) FFI declarations for relevant C++ functions
+
+extern "C" {
+    /// This match the signature from `api.cpp`.
+    pub fn one_dense_pair_v2t(
+        n_obs: c_uint,
+        obs_ids: *const *const c_char,
+        sample1: *const c_double,
+        sample2: *const c_double,
+        tree_data: *const OpaqueBPTree,
+        unifrac_method: *const c_char, // "unweighted", "weighted_normalized", etc.
+        variance_adjust: bool,
+        alpha: c_double,
+        bypass_tips: bool,
+        result: *mut c_double,
+    ) -> ComputeStatus;
+
+    /// Function to build a BPTree from a Newick string.  
+    /// On success, it writes an allocated `OpaqueBPTree*` into `tree_data_out`.
+    /// 
+    /// e.g. `load_bptree_opaque("(A:0.1,B:0.2);", &mut tree_ptr);`
+    fn load_bptree_opaque(newick: *const c_char, tree_data_out: *mut *mut OpaqueBPTree);
+
+    /// Free the BPTree allocated by `load_bptree_opaque`.
+    fn destroy_bptree_opaque(tree_data: *mut *mut OpaqueBPTree);
+}
+
+// -----------------------------------------------------------------------------
+// 3) DistUniFrac_C struct holding all parameters for one_dense_pair_v2t
+// -----------------------------------------------------------------------------
+
+#[repr(C)]
+pub struct DistUniFrac_C {
+    /// Number of features (observations)
+    pub n_obs: c_uint,
+
+    /// Array of feature IDs (C-strings) of length `n_obs`.
+    pub obs_ids: *const *const c_char,
+
+    /// Opaque pointer to the BPTree.
+    pub tree_data: *const OpaqueBPTree,
+
+    /// The method (e.g. "unweighted", "weighted_normalized", etc.)
+    pub unifrac_method: *const c_char,
+
+    /// Whether to do variance-adjust
+    pub variance_adjust: bool,
+
+    /// The alpha parameter (for "generalized" UniFrac).
+    pub alpha: c_double,
+
+    /// Whether to bypass tips
+    pub bypass_tips: bool,
+}
+
+// -----------------------------------------------------------------------------
+// 4) The actual distance function bridging to one_dense_pair_v2t
+// -----------------------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn dist_unifrac_c(
+    ctx: *const DistUniFrac_C,
+    va: *const f32,
+    vb: *const f32,
+    length: c_ulonglong,
+) -> f32 {
+    if ctx.is_null() {
+        eprintln!("dist_unifrac_c: NULL context pointer!");
+        return 0.0;
+    }
+    let ctx_ref = unsafe { &*ctx };
+
+    // sanity check
+    if length != ctx_ref.n_obs as u64 {
+        eprintln!(
+            "dist_unifrac_c: length mismatch. Got {}, expected {}",
+            length, ctx_ref.n_obs
+        );
+        return 0.0;
+    }
+
+    // Convert the input slices from f32 to f64
+    let slice_a = unsafe { slice::from_raw_parts(va, length as usize) };
+    let slice_b = unsafe { slice::from_raw_parts(vb, length as usize) };
+
+    let mut buf_a = Vec::with_capacity(slice_a.len());
+    let mut buf_b = Vec::with_capacity(slice_b.len());
+    for (&a, &b) in slice_a.iter().zip(slice_b.iter()) {
+        buf_a.push(a as f64);
+        buf_b.push(b as f64);
+    }
+
+    let mut dist_out: c_double = 0.0;
+
+    let status = unsafe {
+        one_dense_pair_v2t(
+            ctx_ref.n_obs,
+            ctx_ref.obs_ids,
+            buf_a.as_ptr(),
+            buf_b.as_ptr(),
+            ctx_ref.tree_data,
+            ctx_ref.unifrac_method,
+            ctx_ref.variance_adjust,
+            ctx_ref.alpha,
+            ctx_ref.bypass_tips,
+            &mut dist_out,
+        )
+    };
+
+    if status == ComputeStatus::Okay {
+        dist_out as f32
+    } else {
+        eprintln!("one_dense_pair_v2t returned status {:?}", status);
+        0.0
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 5) Helper to create & destroy DistUniFrac_C from Rust
+// -----------------------------------------------------------------------------
+
+/// Create a DistUniFrac_C context on the heap; returns a pointer.
+/// In a real system, set up `obs_ids` from a Rust `Vec<String>`
+/// by building `CString`s and storing them in a stable array.
+#[no_mangle]
+pub extern "C" fn dist_unifrac_create(
+    n_obs: c_uint,
+    obs_ids: *const *const c_char,
+    tree_data: *const OpaqueBPTree,
+    unifrac_method: *const c_char,
+    variance_adjust: bool,
+    alpha: c_double,
+    bypass_tips: bool,
+) -> *mut DistUniFrac_C {
+    let ctx = DistUniFrac_C {
+        n_obs,
+        obs_ids,
+        tree_data,
+        unifrac_method,
+        variance_adjust,
+        alpha,
+        bypass_tips,
+    };
+    Box::into_raw(Box::new(ctx))
+}
+
+/// Destroy the DistUniFrac_C context. This does NOT free the tree or the obs_ids array.
+#[no_mangle]
+pub extern "C" fn dist_unifrac_destroy(ctx_ptr: *mut DistUniFrac_C) {
+    if !ctx_ptr.is_null() {
+        unsafe {
+            let _ = Box::from_raw(ctx_ptr);
+        }
+    }
+}
+
+// 6) a small wrapper struct implementing your Distance<f32> trait
+//    so you can use dist_unifrac_c as a "distance function pointer."
+/// Type alias for the actual extern "C" function pointer we use.
+pub type DistUniFracFnPtr = extern "C" fn(
+    *const DistUniFrac_C,
+    *const f32,
+    *const f32,
+    c_ulonglong
+) -> f32;
+
+pub struct DistUniFracCFFI {
+    ctx: *mut DistUniFrac_C,
+    func: DistUniFracFnPtr,
+}
+
+impl DistUniFracCFFI {
+    pub fn new(ctx: *mut DistUniFrac_C) -> Self {
+        DistUniFracCFFI {
+            ctx,
+            func: dist_unifrac_c, // the function above
+        }
+    }
+
+    pub fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
+        (self.func)(
+            self.ctx,
+            va.as_ptr(),
+            vb.as_ptr(),
+            va.len() as c_ulonglong,
+        )
+    }
+}
+///end DistUniFrac_C
+
 //========================================================================================================
 
 /// This structure is to let user define their own distance with closures.
@@ -1195,12 +1419,42 @@ mod tests {
     use super::*;
     use log::debug;
     use env_logger::Env;
+    use std::ffi::{CString};
+    use std::ptr;
 
     fn init_log() -> u64 {
         let mut builder = env_logger::Builder::from_default_env();
         let _ = builder.is_test(true).try_init();
         println!("\n ************** initializing logger *****************\n");
         return 1;
+    }
+    /// Helper to create a raw array of `*const c_char` for T1..T6.
+    fn make_obs_ids() -> Vec<*mut c_char> {
+        let obs = vec![
+            CString::new("T1").unwrap(),
+            CString::new("T2").unwrap(),
+            CString::new("T3").unwrap(),
+            CString::new("T4").unwrap(),
+            CString::new("T5").unwrap(),
+            CString::new("T6").unwrap(),
+        ];
+        let mut c_ptrs = Vec::with_capacity(obs.len());
+        for s in obs {
+            // into_raw() -> *mut c_char
+            c_ptrs.push(s.into_raw()); 
+        }
+        c_ptrs
+    }
+    
+    fn free_obs_ids(c_ptrs: &mut [*mut c_char]) {
+        for &mut ptr in c_ptrs {
+            if !ptr.is_null() {
+                // Convert back to a CString so it will be freed
+                unsafe {
+                    let _ = CString::from_raw(ptr);
+                }
+            }
+        }
     }
 
     #[test]
@@ -1659,5 +1913,98 @@ mod tests {
         println!("Weighted EMDUniFrac(A,B) = {}", d);
         // Should be ~0.7279
         // e.g. assert!((d - 0.7279).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_unifrac_unweighted_c_api() {
+        // 1) Build a BPTree from a Newick string
+        let newick_str = CString::new("((T1:0.1,(T2:0.05,T3:0.05):0.02):0.3,(T4:0.2,(T5:0.1,T6:0.15):0.05):0.4);").unwrap();
+        let mut tree_ptr: *mut OpaqueBPTree = ptr::null_mut();
+        unsafe {
+            load_bptree_opaque(newick_str.as_ptr(), &mut tree_ptr);
+        }
+        assert!(!tree_ptr.is_null(), "Failed to build tree");
+
+        // 2) Create obs_ids = T1..T6
+
+        let mut obs_ids = make_obs_ids();
+        let obs_ids_ptr = obs_ids.as_ptr() as *const *const c_char;
+
+        // 3) Build DistUniFrac_C context for "unweighted"
+        let method_str = CString::new("unweighted").unwrap();
+        let ctx_ptr = dist_unifrac_create(
+            6, // n_obs
+            obs_ids_ptr,
+            tree_ptr,
+            method_str.as_ptr(),
+            false,   // variance_adjust = false
+            1.0,     // alpha
+            false,   // bypass_tips = false
+        );
+        assert!(!ctx_ptr.is_null());
+
+        // 4) Use dist_unifrac_c or DistUniFracCFFI to compute distance
+        let dist_obj = DistUniFracCFFI::new(ctx_ptr);
+
+        // Same example data:
+        // Sample A => T1=7, T3=5, T4=2 => presence
+        // Sample B => T2=3, T5=4, T6=9 => presence
+        // We'll put them in f32 arrays of length 6: [T1,T2,T3,T4,T5,T6].
+        let va = [7.0, 0.0, 5.0, 2.0, 0.0, 0.0];
+        let vb = [0.0, 3.0, 0.0, 0.0, 4.0, 9.0];
+
+        let dist = dist_obj.eval(&va, &vb);
+        println!("Unweighted UniFrac(A,B) = {}", dist);
+        // You mention it should be ~0.4833. Let's check tolerance
+        // 5) Clean up
+        unsafe {
+            dist_unifrac_destroy(ctx_ptr);
+            destroy_bptree_opaque(&mut tree_ptr);
+        }
+        free_obs_ids(&mut obs_ids);
+    }
+
+    #[test]
+    fn test_unifrac_weighted_c_api() {
+        // 1) Build the same BPTree
+        let newick_str = CString::new("((T1:0.1,(T2:0.05,T3:0.05):0.02):0.3,(T4:0.2,(T5:0.1,T6:0.15):0.05):0.4);").unwrap();
+        let mut tree_ptr: *mut OpaqueBPTree = ptr::null_mut();
+        unsafe {
+            load_bptree_opaque(newick_str.as_ptr(), &mut tree_ptr);
+        }
+        assert!(!tree_ptr.is_null(), "Failed to build tree");
+
+        // 2) obs_ids
+        let mut obs_ids = make_obs_ids();
+        let obs_ids_ptr = obs_ids.as_ptr() as *const *const c_char;
+
+        // 3) DistUniFrac_C for "weighted_normalized" (or just "weighted" if your C++ wants that)
+        let method_str = CString::new("weighted_normalized").unwrap();
+        let ctx_ptr = dist_unifrac_create(
+            6,
+            obs_ids_ptr,
+            tree_ptr,
+            method_str.as_ptr(),
+            false, // variance_adjust
+            1.0,   // alpha
+            false, // bypass_tips
+        );
+        assert!(!ctx_ptr.is_null());
+
+        // 4) Evaluate
+        let dist_obj = DistUniFracCFFI::new(ctx_ptr);
+        let va = [7.0, 0.0, 5.0, 2.0, 0.0, 0.0];
+        let vb = [0.0, 3.0, 0.0, 0.0, 4.0, 9.0];
+
+        let dist = dist_obj.eval(&va, &vb);
+        println!("Weighted UniFrac(A,B) = {}", dist);
+
+
+        // 5) Cleanup
+        unsafe {
+            dist_unifrac_destroy(ctx_ptr);
+            destroy_bptree_opaque(&mut tree_ptr);
+        }
+        free_obs_ids(&mut obs_ids);
     }
 } // end of module tests
