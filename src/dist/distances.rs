@@ -54,7 +54,7 @@ enum DistKind {
     /// To store a distance defined by a C pointer function
     DistCFnPtr,
     /// To store a distance defined by a UniFrac C pointer function, see here: https://github.com/sfiligoi/unifrac-binaries/tree/simple1_250107
-    DistUniFracCFFI,
+    DistUniFracCFFI(String),
     /// Distance defined by a closure
     DistFn,
     /// Distance defined by a fn Rust pointer
