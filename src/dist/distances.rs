@@ -54,7 +54,7 @@ enum DistKind {
     /// To store a distance defined by a C pointer function
     DistCFnPtr,
     /// To store a distance defined by a UniFrac C pointer function, see here: https://github.com/sfiligoi/unifrac-binaries/tree/simple1_250107
-    DistUniFracFnPtr,
+    DistUniFracCFFI,
     /// Distance defined by a closure
     DistFn,
     /// Distance defined by a fn Rust pointer
@@ -1156,7 +1156,7 @@ impl<T: Copy + Clone + Sized + Send + Sync> Distance<T> for DistCFFI<T> {
 // -----------------------------------------------------------------------------
 // 1) Reproduce some enums / types from C++ side
 // -----------------------------------------------------------------------------
-/// Mirror of `compute_status` enum from C++.
+/// Mirror of your `compute_status` enum from C++.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ComputeStatus {
@@ -1165,9 +1165,9 @@ pub enum ComputeStatus {
     TreeMissing = 2,
     TableMissing = 3,
     TableEmpty = 4,
-    TableAndTreeDoNotOverlap = 5, 
-    OutputError = 6, 
-    InvalidMethod = 7, 
+    TableAndTreeDoNotOverlap = 5,
+    OutputError = 6,
+    InvalidMethod = 7,
     GroupingMissing = 8,
 }
 
@@ -1176,64 +1176,52 @@ pub enum ComputeStatus {
 pub struct OpaqueBPTree {
     _private: [u8; 0], // no fields in Rust
 }
-// 2) FFI declarations for relevant C++ functions
 
+/// This struct holds parameters for one_dense_pair_v2t in C++.
+#[repr(C)]
+pub struct DistUniFrac_C {
+    pub n_obs: c_uint,
+    pub obs_ids: *const *const c_char,
+    pub tree_data: *const OpaqueBPTree,
+    pub unifrac_method: *const c_char,
+    pub variance_adjust: bool,
+    pub alpha: c_double,
+    pub bypass_tips: bool,
+}
+
+// ----------------------------------------------------------------------------
+// 2) Expose the extern "C" functions from your C++ library
+// ----------------------------------------------------------------------------
 extern "C" {
-    /// This match the signature from `api.cpp`.
+    /// Builds a BPTree from a Newick string.  
+    /// On success, it writes an allocated `OpaqueBPTree*` into `tree_data_out`.
+    pub fn load_bptree_opaque(
+        newick: *const c_char,
+        tree_data_out: *mut *mut OpaqueBPTree,
+    );
+
+    /// Frees the BPTree allocated by `load_bptree_opaque`.
+    pub fn destroy_bptree_opaque(tree_data: *mut *mut OpaqueBPTree);
+
+    /// The main distance function in C++:  
+    ///   one_dense_pair_v2t(n_obs, obs_ids, sample1, sample2, tree_data, method_str, ...)
     pub fn one_dense_pair_v2t(
         n_obs: c_uint,
         obs_ids: *const *const c_char,
         sample1: *const c_double,
         sample2: *const c_double,
         tree_data: *const OpaqueBPTree,
-        unifrac_method: *const c_char, // "unweighted", "weighted_normalized", etc.
+        unifrac_method: *const c_char,
         variance_adjust: bool,
         alpha: c_double,
         bypass_tips: bool,
         result: *mut c_double,
     ) -> ComputeStatus;
-
-    /// Function to build a BPTree from a Newick string.  
-    /// On success, it writes an allocated `OpaqueBPTree*` into `tree_data_out`.
-    /// 
-    /// e.g. `load_bptree_opaque("(A:0.1,B:0.2);", &mut tree_ptr);`
-    fn load_bptree_opaque(newick: *const c_char, tree_data_out: *mut *mut OpaqueBPTree);
-
-    /// Free the BPTree allocated by `load_bptree_opaque`.
-    fn destroy_bptree_opaque(tree_data: *mut *mut OpaqueBPTree);
 }
 
-// -----------------------------------------------------------------------------
-// 3) DistUniFrac_C struct holding all parameters for one_dense_pair_v2t
-// -----------------------------------------------------------------------------
-
-#[repr(C)]
-pub struct DistUniFrac_C {
-    /// Number of features (observations)
-    pub n_obs: c_uint,
-
-    /// Array of feature IDs (C-strings) of length `n_obs`.
-    pub obs_ids: *const *const c_char,
-
-    /// Opaque pointer to the BPTree.
-    pub tree_data: *const OpaqueBPTree,
-
-    /// The method (e.g. "unweighted", "weighted_normalized", etc.)
-    pub unifrac_method: *const c_char,
-
-    /// Whether to do variance-adjust
-    pub variance_adjust: bool,
-
-    /// The alpha parameter (for "generalized" UniFrac).
-    pub alpha: c_double,
-
-    /// Whether to bypass tips
-    pub bypass_tips: bool,
-}
-
-// -----------------------------------------------------------------------------
-// 4) The actual distance function bridging to one_dense_pair_v2t
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// 3) Provide a function bridging from f32 slices to one_dense_pair_v2t
+// ----------------------------------------------------------------------------
 
 #[no_mangle]
 pub extern "C" fn dist_unifrac_c(
@@ -1248,7 +1236,6 @@ pub extern "C" fn dist_unifrac_c(
     }
     let ctx_ref = unsafe { &*ctx };
 
-    // sanity check
     if length != ctx_ref.n_obs as u64 {
         eprintln!(
             "dist_unifrac_c: length mismatch. Got {}, expected {}",
@@ -1257,19 +1244,17 @@ pub extern "C" fn dist_unifrac_c(
         return 0.0;
     }
 
-    // Convert the input slices from f32 to f64
     let slice_a = unsafe { slice::from_raw_parts(va, length as usize) };
     let slice_b = unsafe { slice::from_raw_parts(vb, length as usize) };
 
     let mut buf_a = Vec::with_capacity(slice_a.len());
     let mut buf_b = Vec::with_capacity(slice_b.len());
-    for (&a, &b) in slice_a.iter().zip(slice_b.iter()) {
-        buf_a.push(a as f64);
-        buf_b.push(b as f64);
+    for (&a_val, &b_val) in slice_a.iter().zip(slice_b.iter()) {
+        buf_a.push(a_val as f64);
+        buf_b.push(b_val as f64);
     }
 
     let mut dist_out: c_double = 0.0;
-
     let status = unsafe {
         one_dense_pair_v2t(
             ctx_ref.n_obs,
@@ -1284,7 +1269,6 @@ pub extern "C" fn dist_unifrac_c(
             &mut dist_out,
         )
     };
-
     if status == ComputeStatus::Okay {
         dist_out as f32
     } else {
@@ -1293,11 +1277,10 @@ pub extern "C" fn dist_unifrac_c(
     }
 }
 
-// -----------------------------------------------------------------------------
-// 5) Helper to create & destroy DistUniFrac_C from Rust
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// 4) Provide create/destroy for DistUniFrac_C
+// ----------------------------------------------------------------------------
 
-/// Create a DistUniFrac_C context on the heap; returns a pointer.
 #[no_mangle]
 pub extern "C" fn dist_unifrac_create(
     n_obs: c_uint,
@@ -1320,7 +1303,6 @@ pub extern "C" fn dist_unifrac_create(
     Box::into_raw(Box::new(ctx))
 }
 
-/// Destroy the DistUniFrac_C context. This does NOT free the tree or the obs_ids array.
 #[no_mangle]
 pub extern "C" fn dist_unifrac_destroy(ctx_ptr: *mut DistUniFrac_C) {
     if !ctx_ptr.is_null() {
@@ -1330,29 +1312,25 @@ pub extern "C" fn dist_unifrac_destroy(ctx_ptr: *mut DistUniFrac_C) {
     }
 }
 
-// 6) a small wrapper struct implementing Distance<f32> trait
-// so dist_unifrac_c as a "distance function pointer."
-// Type alias for the actual extern "C" function pointer.
-pub type DistUniFracFnPtr = extern "C" fn(
-    *const DistUniFrac_C,
-    *const f32,
-    *const f32,
-    c_ulonglong
-) -> f32;
+// ----------------------------------------------------------------------------
+// 5) DistUniFracCFFI struct implementing Distance<f32>
+// ----------------------------------------------------------------------------
 
+#[derive(Clone)]  // We'll do a shallow clone of the pointer
 pub struct DistUniFracCFFI {
     ctx: *mut DistUniFrac_C,
-    func: DistUniFracFnPtr,
+    func: extern "C" fn(*const DistUniFrac_C, *const f32, *const f32, c_ulonglong) -> f32,
 }
 
 impl DistUniFracCFFI {
     pub fn new(ctx: *mut DistUniFrac_C) -> Self {
         DistUniFracCFFI {
             ctx,
-            func: dist_unifrac_c, // the function above
+            func: dist_unifrac_c,
         }
     }
 
+    /// A direct convenience method
     pub fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
         (self.func)(
             self.ctx,
@@ -1360,6 +1338,13 @@ impl DistUniFracCFFI {
             vb.as_ptr(),
             va.len() as c_ulonglong,
         )
+    }
+}
+
+/// Implement the `Distance<f32>` trait so that DistUniFracCFFI can be used in HNSW:
+impl Distance<f32> for DistUniFracCFFI {
+    fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
+        self.eval(va, vb)
     }
 }
 ///end DistUniFrac_C
