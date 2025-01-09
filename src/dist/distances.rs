@@ -1347,6 +1347,10 @@ impl Distance<f32> for DistUniFracCFFI {
         self.eval(va, vb)
     }
 }
+
+unsafe impl Send for DistUniFracCFFI {}
+unsafe impl Sync for DistUniFracCFFI {}
+
 ///end DistUniFrac_C
 
 //========================================================================================================
