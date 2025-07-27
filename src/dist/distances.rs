@@ -34,6 +34,8 @@ use env_logger::Env;
 // for BitVec used in NewDistUniFrac
 use bitvec::prelude::*;
 
+// NewDistUniFrac now uses the same pattern as unifrac_bp with succparen-like data structures
+
 // for DistCFnPtr_UniFrac
 use std::os::raw::{c_char, c_double, c_uint, c_ulonglong};
 use std::ffi::CStr;
@@ -267,7 +269,7 @@ macro_rules! implementDotDistance(
             // to // by rayon
             let dot = va.iter().zip(vb.iter()).map(|t| (*t.0 * *t.1) as f32).fold(0., |acc , t| (acc + t));
             //
-            assert!(dot <= 1.);
+            assert(dot <= 1.);
             return  1. - dot;
         } // end of function
       } // end of impl block
@@ -844,7 +846,7 @@ impl Distance<f32> for NewDistUniFrac {
     fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
         let a: BitVec<u8, Lsb0> = va.iter().map(|&x| x > 0.0).collect();
         let b: BitVec<u8, Lsb0> = vb.iter().map(|&x| x > 0.0).collect();
-        self.unifrac_pair(&a, &b) as f32
+        unifrac_pair(&self.post, &self.kids, &self.lens, &self.leaf_ids, &a, &b) as f32
     }
 }
 impl NewDistUniFrac {
@@ -853,10 +855,14 @@ impl NewDistUniFrac {
         weighted: bool,
         feature_names: Vec<String>,
     ) -> Result<Self> {
+        // For now, we need to parse using phylotree and then convert to the succparen-like format
+        // This will be replaced when you provide the actual succparen parsing code
         let tree = Tree::from_newick(newick_str)?;
 
         let root = tree.get_root().map_err(|_| anyhow!("Tree has no root"))?;
         let post = tree.postorder(&root)?;
+        
+        // Build kids array (children for each node)
         let mut kids = vec![Vec::new(); tree.size()];
         for i in 0..tree.size() {
             let node = tree.get(&i)?;
@@ -864,17 +870,21 @@ impl NewDistUniFrac {
                 kids[i].push(child);
             }
         }
+        
+        // Build lens array (edge lengths)
         let mut lens = vec![0.0; tree.size()];
         for i in 0..tree.size() {
             let node = tree.get(&i)?;
             lens[i] = node.parent_edge.unwrap_or(0.0) as f32;
         }
+        
+        // Build leaf_ids array - only leaves that are in feature_names
         let mut leaf_ids = Vec::new();
         for i in 0..tree.size() {
             let node = tree.get(&i)?;
             if node.is_tip() {
                 if let Some(name) = &node.name {
-                    if feature_names.iter().any(|f| f == name) {
+                    if let Some(_) = feature_names.iter().position(|f| f == name) {
                         leaf_ids.push(i);
                     }
                 }
@@ -890,34 +900,49 @@ impl NewDistUniFrac {
             feature_names,
         })
     }
+}
 
-    pub fn unifrac_pair(
-        &self,
-        a: &BitVec<u8, Lsb0>,
-        b: &BitVec<u8, Lsb0>,
-    ) -> f64 {
-        const A_BIT: u8 = 0b01;
-        const B_BIT: u8 = 0b10;
-        let mut mask = vec![0u8; self.lens.len()];
-        for (leaf_pos, &nid) in self.leaf_ids.iter().enumerate() {
-            if a[leaf_pos] { mask[nid] |= A_BIT; }
-            if b[leaf_pos] { mask[nid] |= B_BIT; }
-        }
-        for &v in &self.post {
-            for &c in &self.kids[v] {
-                mask[v] |= mask[c];
-            }
-        }
-        let (mut shared, mut union) = (0.0, 0.0);
-        for &v in &self.post {
-            let m = mask[v];
-            if m == 0 { continue }
-            let len = self.lens[v] as f64;
-            if m == A_BIT || m == B_BIT { union  += len; }
-            else { shared += len; union += len; }
-        }
-        if union == 0.0 { 0.0 } else { 1.0 - shared / union }
+/// UniFrac distance computation following the unifrac_bp pattern
+fn unifrac_pair(
+    post: &[usize],
+    kids: &[Vec<usize>],
+    lens: &[f32],
+    leaf_ids: &[usize],
+    a: &BitVec<u8, Lsb0>,
+    b: &BitVec<u8, Lsb0>,
+) -> f64 {
+    const A_BIT: u8 = 0b01;
+    const B_BIT: u8 = 0b10;
+    //  0 .. total-1
+    let mut mask = vec![0u8; lens.len()];            
+    // leaves
+    for (leaf_pos, &nid) in leaf_ids.iter().enumerate() {
+        if a[leaf_pos] { mask[nid] |= A_BIT; }
+        if b[leaf_pos] { mask[nid] |= B_BIT; }
     }
+    // internal nodes – post-order ⇒ children processed already
+    for &v in post {
+        for &c in &kids[v] {
+            mask[v] |= mask[c];
+        }
+    }
+
+    // Step 2: accumulate only where at least one present
+    let (mut shared, mut union) = (0.0, 0.0);
+
+    for &v in post {
+        let m = mask[v];
+        // Guard, only taxa showed up in at least one sample wil be used
+        if m == 0 { continue }                       
+
+        let len = lens[v] as f64;
+        // exactly one present?
+        if m == A_BIT || m == B_BIT { union  += len; }
+        // m == 0b11 
+        else { shared += len; union += len; }
+    }
+
+    if union == 0.0 { 0.0 } else { 1.0 - shared / union }
 }
 
 // End of NewDistUniFrac
