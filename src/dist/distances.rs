@@ -31,6 +31,9 @@ use std::collections::HashMap;
 use log::{debug, info};
 use env_logger::Env;
 
+// for BitVec used in NewDistUniFrac
+use bitvec::prelude::*;
+
 // for DistCFnPtr_UniFrac
 use std::os::raw::{c_char, c_double, c_uint, c_ulonglong};
 use std::ffi::CStr;
@@ -264,7 +267,7 @@ macro_rules! implementDotDistance(
             // to // by rayon
             let dot = va.iter().zip(vb.iter()).map(|t| (*t.0 * *t.1) as f32).fold(0., |acc , t| (acc + t));
             //
-            assert(dot <= 1.);
+            assert!(dot <= 1.);
             return  1. - dot;
         } // end of function
       } // end of impl block
@@ -826,6 +829,98 @@ fn build_leaf_map(
     }
     Ok(leaf_map)
 }
+
+// start of NewDistUniFrac
+#[derive(Default, Clone)]
+pub struct NewDistUniFrac {
+    pub weighted: bool,
+    pub post: Vec<usize>,
+    pub kids: Vec<Vec<usize>>,
+    pub lens: Vec<f32>,
+    pub leaf_ids: Vec<usize>,
+    pub feature_names: Vec<String>,
+}
+impl Distance<f32> for NewDistUniFrac {
+    fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
+        let a: BitVec<u8, Lsb0> = va.iter().map(|&x| x > 0.0).collect();
+        let b: BitVec<u8, Lsb0> = vb.iter().map(|&x| x > 0.0).collect();
+        self.unifrac_pair(&a, &b) as f32
+    }
+}
+impl NewDistUniFrac {
+    pub fn new(
+        newick_str: &str,
+        weighted: bool,
+        feature_names: Vec<String>,
+    ) -> Result<Self> {
+        let tree = Tree::from_newick(newick_str)?;
+
+        let root = tree.get_root().map_err(|_| anyhow!("Tree has no root"))?;
+        let post = tree.postorder(&root)?;
+        let mut kids = vec![Vec::new(); tree.size()];
+        for i in 0..tree.size() {
+            let node = tree.get(&i)?;
+            for &child in &node.children {
+                kids[i].push(child);
+            }
+        }
+        let mut lens = vec![0.0; tree.size()];
+        for i in 0..tree.size() {
+            let node = tree.get(&i)?;
+            lens[i] = node.parent_edge.unwrap_or(0.0) as f32;
+        }
+        let mut leaf_ids = Vec::new();
+        for i in 0..tree.size() {
+            let node = tree.get(&i)?;
+            if node.is_tip() {
+                if let Some(name) = &node.name {
+                    if feature_names.iter().any(|f| f == name) {
+                        leaf_ids.push(i);
+                    }
+                }
+            }
+        }
+
+        Ok(Self {
+            weighted,
+            post,
+            kids,
+            lens,
+            leaf_ids,
+            feature_names,
+        })
+    }
+
+    pub fn unifrac_pair(
+        &self,
+        a: &BitVec<u8, Lsb0>,
+        b: &BitVec<u8, Lsb0>,
+    ) -> f64 {
+        const A_BIT: u8 = 0b01;
+        const B_BIT: u8 = 0b10;
+        let mut mask = vec![0u8; self.lens.len()];
+        for (leaf_pos, &nid) in self.leaf_ids.iter().enumerate() {
+            if a[leaf_pos] { mask[nid] |= A_BIT; }
+            if b[leaf_pos] { mask[nid] |= B_BIT; }
+        }
+        for &v in &self.post {
+            for &c in &self.kids[v] {
+                mask[v] |= mask[c];
+            }
+        }
+        let (mut shared, mut union) = (0.0, 0.0);
+        for &v in &self.post {
+            let m = mask[v];
+            if m == 0 { continue }
+            let len = self.lens[v] as f64;
+            if m == A_BIT || m == B_BIT { union  += len; }
+            else { shared += len; union += len; }
+        }
+        if union == 0.0 { 0.0 } else { 1.0 - shared / union }
+    }
+}
+
+// End of NewDistUniFrac
 
 /// Build a bitmask for data[i] > 0.0 using AVX2 intrinsics. 
 /// # Safety
