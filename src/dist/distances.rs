@@ -34,7 +34,7 @@ use env_logger::Env;
 // for BitVec used in NewDistUniFrac
 use bitvec::prelude::*;
 
-// NewDistUniFrac now uses the same pattern as unifrac_bp with succparen-like data structures
+// NewDistUniFrac uses succparen data structures for efficient tree representation
 
 // for DistCFnPtr_UniFrac
 use std::os::raw::{c_char, c_double, c_uint, c_ulonglong};
@@ -833,6 +833,195 @@ fn build_leaf_map(
 }
 
 // start of NewDistUniFrac
+
+/// Parse Newick string directly to succparen data structures without using phylotree
+fn parse_newick_to_succparen(
+    newick_str: &str,
+    feature_names: &[String],
+) -> Result<(Vec<usize>, Vec<Vec<usize>>, Vec<f32>, Vec<usize>)> {
+    // Simple Newick parser that builds succparen structures directly
+    let mut nodes = Vec::new();
+    let mut stack = Vec::new();
+    let mut current_node_id = 0;
+    let mut chars = newick_str.trim_end_matches(';').chars().peekable();
+    
+    // Node structure for parsing
+    #[derive(Debug, Clone)]
+    struct ParseNode {
+        id: usize,
+        name: Option<String>,
+        branch_length: f32,
+        children: Vec<usize>,
+        parent: Option<usize>,
+    }
+    
+    while let Some(ch) = chars.next() {
+        match ch {
+            '(' => {
+                // Start of a new internal node
+                let node = ParseNode {
+                    id: current_node_id,
+                    name: None,
+                    branch_length: 0.0,
+                    children: Vec::new(),
+                    parent: None,
+                };
+                stack.push(current_node_id);
+                nodes.push(node);
+                current_node_id += 1;
+            }
+            ')' => {
+                // End of internal node - read name and branch length
+                let node_id = stack.pop().ok_or_else(|| anyhow!("Unmatched closing parenthesis"))?;
+                
+                // Skip any whitespace
+                while chars.peek() == Some(&' ') {
+                    chars.next();
+                }
+                
+                // Read node name (if any)
+                let mut name = String::new();
+                while let Some(&ch) = chars.peek() {
+                    if ch == ':' || ch == ',' || ch == ')' || ch == ';' {
+                        break;
+                    }
+                    name.push(chars.next().unwrap());
+                }
+                if !name.is_empty() {
+                    nodes[node_id].name = Some(name.trim().to_string());
+                }
+                
+                // Read branch length (if any)
+                if chars.peek() == Some(&':') {
+                    chars.next(); // consume ':'
+                    let mut length_str = String::new();
+                    while let Some(&ch) = chars.peek() {
+                        if ch == ',' || ch == ')' || ch == ';' {
+                            break;
+                        }
+                        length_str.push(chars.next().unwrap());
+                    }
+                    if let Ok(length) = length_str.trim().parse::<f32>() {
+                        nodes[node_id].branch_length = length;
+                    }
+                }
+            }
+            ',' => {
+                // Separator between siblings - nothing to do
+            }
+            ' ' => {
+                // Skip whitespace
+            }
+            _ => {
+                // Start of a leaf node name
+                let mut name = String::new();
+                name.push(ch);
+                
+                // Read the rest of the name
+                while let Some(&ch) = chars.peek() {
+                    if ch == ':' || ch == ',' || ch == ')' || ch == ';' {
+                        break;
+                    }
+                    name.push(chars.next().unwrap());
+                }
+                
+                // Create leaf node
+                let mut leaf_node = ParseNode {
+                    id: current_node_id,
+                    name: Some(name.trim().to_string()),
+                    branch_length: 0.0,
+                    children: Vec::new(),
+                    parent: None,
+                };
+                
+                // Read branch length (if any)
+                if chars.peek() == Some(&':') {
+                    chars.next(); // consume ':'
+                    let mut length_str = String::new();
+                    while let Some(&ch) = chars.peek() {
+                        if ch == ',' || ch == ')' || ch == ';' {
+                            break;
+                        }
+                        length_str.push(chars.next().unwrap());
+                    }
+                    if let Ok(length) = length_str.trim().parse::<f32>() {
+                        leaf_node.branch_length = length;
+                    }
+                }
+                
+                // Add child to current parent
+                if let Some(&parent_id) = stack.last() {
+                    nodes[parent_id].children.push(current_node_id);
+                    leaf_node.parent = Some(parent_id);
+                }
+                
+                nodes.push(leaf_node);
+                current_node_id += 1;
+            }
+        }
+    }
+    
+    // Build parent-child relationships
+    for i in 0..nodes.len() {
+        for &child_id in &nodes[i].children.clone() {
+            if child_id < nodes.len() {
+                nodes[child_id].parent = Some(i);
+            }
+        }
+    }
+    
+    // Build succparen structures
+    let root_id = 0; // Assuming root is the first node
+    let mut post = Vec::new();
+    let mut visited = vec![false; nodes.len()];
+    
+    // Post-order traversal
+    fn postorder_visit(
+        node_id: usize,
+        nodes: &[ParseNode],
+        visited: &mut [bool],
+        post: &mut Vec<usize>,
+    ) {
+        if visited[node_id] {
+            return;
+        }
+        visited[node_id] = true;
+        
+        for &child_id in &nodes[node_id].children {
+            postorder_visit(child_id, nodes, visited, post);
+        }
+        post.push(node_id);
+    }
+    
+    postorder_visit(root_id, &nodes, &mut visited, &mut post);
+    
+    // Build kids array
+    let mut kids = vec![Vec::new(); nodes.len()];
+    for node in &nodes {
+        kids[node.id] = node.children.clone();
+    }
+    
+    // Build lens array
+    let mut lens = vec![0.0f32; nodes.len()];
+    for node in &nodes {
+        lens[node.id] = node.branch_length;
+    }
+    
+    // Build leaf_ids array - only leaves that are in feature_names
+    let mut leaf_ids = Vec::new();
+    for node in &nodes {
+        if node.children.is_empty() { // is leaf
+            if let Some(ref name) = node.name {
+                if feature_names.iter().any(|f| f == name) {
+                    leaf_ids.push(node.id);
+                }
+            }
+        }
+    }
+    
+    Ok((post, kids, lens, leaf_ids))
+}
+
 #[derive(Default, Clone)]
 pub struct NewDistUniFrac {
     pub weighted: bool,
@@ -842,6 +1031,15 @@ pub struct NewDistUniFrac {
     pub leaf_ids: Vec<usize>,
     pub feature_names: Vec<String>,
 }
+
+/// Implementation of Distance trait for NewDistUniFrac
+/// 
+/// Expected usage:
+/// 1. Create NewDistUniFrac from tree file (.nwk) and feature names from feature table
+/// 2. For each pair of samples, call eval() with abundance vectors
+/// 
+/// The abundance vectors (va, vb) should contain values for each feature in the same
+/// order as provided in feature_names during construction.
 impl Distance<f32> for NewDistUniFrac {
     fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
         let a: BitVec<u8, Lsb0> = va.iter().map(|&x| x > 0.0).collect();
@@ -850,46 +1048,37 @@ impl Distance<f32> for NewDistUniFrac {
     }
 }
 impl NewDistUniFrac {
+    /// Create NewDistUniFrac from Newick string and feature names
+    /// 
+    /// # Arguments
+    /// * `newick_str` - Phylogenetic tree in Newick format
+    /// * `weighted` - Whether to use weighted (true) or unweighted (false) UniFrac
+    /// * `feature_names` - Names of features/taxa in the order they appear in abundance vectors
+    /// 
+    /// # Example
+    /// ```rust
+    /// // Typical workflow:
+    /// // 1. Read tree file
+    /// let tree_content = std::fs::read_to_string("tree.nwk")?;
+    /// 
+    /// // 2. Parse feature table to get feature names (e.g., from CSV/TSV header)
+    /// let feature_names = vec!["OTU1".to_string(), "OTU2".to_string(), "OTU3".to_string()];
+    /// 
+    /// // 3. Create UniFrac distance calculator
+    /// let unifrac = NewDistUniFrac::new(&tree_content, false, feature_names)?;
+    /// 
+    /// // 4. For each pair of samples from feature table:
+    /// let sample1_abundances = vec![10.0, 0.0, 5.0];  // abundance values for OTU1, OTU2, OTU3
+    /// let sample2_abundances = vec![0.0, 8.0, 2.0];   // abundance values for OTU1, OTU2, OTU3
+    /// let distance = unifrac.eval(&sample1_abundances, &sample2_abundances);
+    /// ```
     pub fn new(
         newick_str: &str,
         weighted: bool,
         feature_names: Vec<String>,
     ) -> Result<Self> {
-        // For now, we need to parse using phylotree and then convert to the succparen-like format
-        // This will be replaced when you provide the actual succparen parsing code
-        let tree = Tree::from_newick(newick_str)?;
-
-        let root = tree.get_root().map_err(|_| anyhow!("Tree has no root"))?;
-        let post = tree.postorder(&root)?;
-        
-        // Build kids array (children for each node)
-        let mut kids = vec![Vec::new(); tree.size()];
-        for i in 0..tree.size() {
-            let node = tree.get(&i)?;
-            for &child in &node.children {
-                kids[i].push(child);
-            }
-        }
-        
-        // Build lens array (edge lengths)
-        let mut lens = vec![0.0; tree.size()];
-        for i in 0..tree.size() {
-            let node = tree.get(&i)?;
-            lens[i] = node.parent_edge.unwrap_or(0.0) as f32;
-        }
-        
-        // Build leaf_ids array - only leaves that are in feature_names
-        let mut leaf_ids = Vec::new();
-        for i in 0..tree.size() {
-            let node = tree.get(&i)?;
-            if node.is_tip() {
-                if let Some(name) = &node.name {
-                    if let Some(_) = feature_names.iter().position(|f| f == name) {
-                        leaf_ids.push(i);
-                    }
-                }
-            }
-        }
+        // Parse Newick string directly to succparen data structures
+        let (post, kids, lens, leaf_ids) = parse_newick_to_succparen(newick_str, &feature_names)?;
 
         Ok(Self {
             weighted,
@@ -900,9 +1089,30 @@ impl NewDistUniFrac {
             feature_names,
         })
     }
+
+    /// Create NewDistUniFrac from file paths
+    pub fn from_files(
+        tree_file: &str,
+        weighted: bool,
+        feature_names: Vec<String>,
+    ) -> Result<Self> {
+        let newick_str = std::fs::read_to_string(tree_file)
+            .map_err(|e| anyhow!("Failed to read tree file '{}': {}", tree_file, e))?;
+        Self::new(&newick_str, weighted, feature_names)
+    }
+
+    /// Get the feature names in the order expected by eval()
+    pub fn feature_names(&self) -> &[String] {
+        &self.feature_names
+    }
+
+    /// Get the number of features
+    pub fn num_features(&self) -> usize {
+        self.feature_names.len()
+    }
 }
 
-/// UniFrac distance computation following the unifrac_bp pattern
+/// UniFrac distance computation using succparen data structures
 fn unifrac_pair(
     post: &[usize],
     kids: &[Vec<usize>],
