@@ -839,186 +839,52 @@ fn parse_newick_to_succparen(
     newick_str: &str,
     feature_names: &[String],
 ) -> Result<(Vec<usize>, Vec<Vec<usize>>, Vec<f32>, Vec<usize>)> {
-    // Simple Newick parser that builds succparen structures directly
-    let mut nodes = Vec::new();
-    let mut stack = Vec::new();
-    let mut current_node_id = 0;
-    let mut chars = newick_str.trim_end_matches(';').chars().peekable();
-    
-    // Node structure for parsing
-    #[derive(Debug, Clone)]
-    struct ParseNode {
-        id: usize,
-        name: Option<String>,
-        branch_length: f32,
-        children: Vec<usize>,
-        parent: Option<usize>,
-    }
-    
-    while let Some(ch) = chars.next() {
-        match ch {
-            '(' => {
-                // Start of a new internal node
-                let node = ParseNode {
-                    id: current_node_id,
-                    name: None,
-                    branch_length: 0.0,
-                    children: Vec::new(),
-                    parent: None,
-                };
-                stack.push(current_node_id);
-                nodes.push(node);
-                current_node_id += 1;
-            }
-            ')' => {
-                // End of internal node - read name and branch length
-                let node_id = stack.pop().ok_or_else(|| anyhow!("Unmatched closing parenthesis"))?;
-                
-                // Skip any whitespace
-                while chars.peek() == Some(&' ') {
-                    chars.next();
-                }
-                
-                // Read node name (if any)
-                let mut name = String::new();
-                while let Some(&ch) = chars.peek() {
-                    if ch == ':' || ch == ',' || ch == ')' || ch == ';' {
-                        break;
-                    }
-                    name.push(chars.next().unwrap());
-                }
-                if !name.is_empty() {
-                    nodes[node_id].name = Some(name.trim().to_string());
-                }
-                
-                // Read branch length (if any)
-                if chars.peek() == Some(&':') {
-                    chars.next(); // consume ':'
-                    let mut length_str = String::new();
-                    while let Some(&ch) = chars.peek() {
-                        if ch == ',' || ch == ')' || ch == ';' {
-                            break;
-                        }
-                        length_str.push(chars.next().unwrap());
-                    }
-                    if let Ok(length) = length_str.trim().parse::<f32>() {
-                        nodes[node_id].branch_length = length;
-                    }
-                }
-            }
-            ',' => {
-                // Separator between siblings - nothing to do
-            }
-            ' ' => {
-                // Skip whitespace
-            }
-            _ => {
-                // Start of a leaf node name
-                let mut name = String::new();
-                name.push(ch);
-                
-                // Read the rest of the name
-                while let Some(&ch) = chars.peek() {
-                    if ch == ':' || ch == ',' || ch == ')' || ch == ';' {
-                        break;
-                    }
-                    name.push(chars.next().unwrap());
-                }
-                
-                // Create leaf node
-                let mut leaf_node = ParseNode {
-                    id: current_node_id,
-                    name: Some(name.trim().to_string()),
-                    branch_length: 0.0,
-                    children: Vec::new(),
-                    parent: None,
-                };
-                
-                // Read branch length (if any)
-                if chars.peek() == Some(&':') {
-                    chars.next(); // consume ':'
-                    let mut length_str = String::new();
-                    while let Some(&ch) = chars.peek() {
-                        if ch == ',' || ch == ')' || ch == ';' {
-                            break;
-                        }
-                        length_str.push(chars.next().unwrap());
-                    }
-                    if let Ok(length) = length_str.trim().parse::<f32>() {
-                        leaf_node.branch_length = length;
-                    }
-                }
-                
-                // Add child to current parent
-                if let Some(&parent_id) = stack.last() {
-                    nodes[parent_id].children.push(current_node_id);
-                    leaf_node.parent = Some(parent_id);
-                }
-                
-                nodes.push(leaf_node);
-                current_node_id += 1;
-            }
+    // Step 1: Parse Newick string into succparen Tree
+    let tree = Tree::from_newick(newick_str)?;
+
+    let node_count = tree.size();
+    let root = tree.root();
+
+    // Step 2: Generate post-order traversal list
+    let post: Vec<usize> = tree
+        .dfs_postorder(root)
+        .map(|nid| nid.to_index())
+        .collect();
+
+    // Step 3: Build `kids` structure
+    let mut kids: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+    for node in tree.nodes() {
+        let parent = node.to_index();
+        for child in tree.children(node) {
+            kids[parent].push(child.to_index());
         }
     }
-    
-    // Build parent-child relationships
-    for i in 0..nodes.len() {
-        for &child_id in &nodes[i].children.clone() {
-            if child_id < nodes.len() {
-                nodes[child_id].parent = Some(i);
-            }
+
+    // Step 4: Get branch lengths for each node
+    let mut lens = vec![0.0f32; node_count];
+    for node in tree.nodes() {
+        if let Some(length) = tree.edge_length(node) {
+            lens[node.to_index()] = length;
         }
     }
-    
-    // Build succparen structures
-    let root_id = 0; // Assuming root is the first node
-    let mut post = Vec::new();
-    let mut visited = vec![false; nodes.len()];
-    
-    // Post-order traversal
-    fn postorder_visit(
-        node_id: usize,
-        nodes: &[ParseNode],
-        visited: &mut [bool],
-        post: &mut Vec<usize>,
-    ) {
-        if visited[node_id] {
-            return;
-        }
-        visited[node_id] = true;
-        
-        for &child_id in &nodes[node_id].children {
-            postorder_visit(child_id, nodes, visited, post);
-        }
-        post.push(node_id);
-    }
-    
-    postorder_visit(root_id, &nodes, &mut visited, &mut post);
-    
-    // Build kids array
-    let mut kids = vec![Vec::new(); nodes.len()];
-    for node in &nodes {
-        kids[node.id] = node.children.clone();
-    }
-    
-    // Build lens array
-    let mut lens = vec![0.0f32; nodes.len()];
-    for node in &nodes {
-        lens[node.id] = node.branch_length;
-    }
-    
-    // Build leaf_ids array - only leaves that are in feature_names
+
+    // Step 5: Find leaf_ids matching the feature_names
+    let name_to_id: HashMap<&str, usize> = tree
+        .nodes()
+        .filter_map(|nid| {
+            tree.name(nid).map(|name| (name, nid.to_index()))
+        })
+        .collect();
+
     let mut leaf_ids = Vec::new();
-    for node in &nodes {
-        if node.children.is_empty() { // is leaf
-            if let Some(ref name) = node.name {
-                if feature_names.iter().any(|f| f == name) {
-                    leaf_ids.push(node.id);
-                }
+    for feature in feature_names {
+        if let Some(&nid) = name_to_id.get(feature.as_str()) {
+            if tree.children(NodeId::from_index(nid)).next().is_none() {
+                leaf_ids.push(nid);
             }
         }
     }
-    
+
     Ok((post, kids, lens, leaf_ids))
 }
 
