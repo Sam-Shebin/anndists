@@ -866,7 +866,7 @@ impl Distance<f32> for NewDistUniFrac {
     fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
         let a: BitVec<u8, Lsb0> = va.iter().map(|&x| x > 0.0).collect();
         let b: BitVec<u8, Lsb0> = vb.iter().map(|&x| x > 0.0).collect();
-        unifrac_pair(&self.lens, &self.leaf_ids, &a, &b) as f32
+        unifrac_pair(&self.post, &self.kids, &self.lens, &self.leaf_ids, &a, &b) as f32
     }
 }
 
@@ -1008,6 +1008,8 @@ fn parse_newick_to_custom(
 }
 
 fn unifrac_pair(
+    post: &[usize],
+    kids: &[Vec<usize>],
     lens: &[f32],
     leaf_ids: &[usize],
     a: &BitVec<u8, Lsb0>,
@@ -1016,22 +1018,23 @@ fn unifrac_pair(
     const A_BIT: u8 = 0b01;
     const B_BIT: u8 = 0b10;
     let mut mask = vec![0u8; lens.len()];
-    
     for (leaf_pos, &nid) in leaf_ids.iter().enumerate() {
         if a[leaf_pos] { mask[nid] |= A_BIT; }
         if b[leaf_pos] { mask[nid] |= B_BIT; }
     }
-    
-    // Simple approach: just use the mask directly on branch lengths
+    for &v in post {
+        for &c in &kids[v] {
+            mask[v] |= mask[c];
+        }
+    }
     let (mut shared, mut union) = (0.0, 0.0);
-    for (i, &len) in lens.iter().enumerate() {
-        let m = mask[i];
+    for &v in post {
+        let m = mask[v];
         if m == 0 { continue }
-        let len = len as f64;
+        let len = lens[v] as f64;
         if m == A_BIT || m == B_BIT { union += len; }
         else { shared += len; union += len; }
     }
-    
     if union == 0.0 { 0.0 } else { 1.0 - shared / union }
 }
 
