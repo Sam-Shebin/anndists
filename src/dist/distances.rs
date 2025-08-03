@@ -33,7 +33,7 @@ use log::debug;
 // for BitVec used in NewDistUniFrac
 use bitvec::prelude::*;
 
-// NewDistUniFrac uses succparen data structures for efficient tree representation
+// NewDistUniFrac uses custom data structures for efficient tree representation
 
 // for DistCFnPtr_UniFrac  
 use std::os::raw::{c_char, c_double, c_uint};
@@ -831,9 +831,47 @@ fn build_leaf_map(
 
 // start of NewDistUniFrac
 
+#[derive(Default, Clone)]
+pub struct NewDistUniFrac {
+    pub weighted: bool,
+    pub post: Vec<usize>,
+    pub kids: Vec<Vec<usize>>,
+    pub lens: Vec<f32>,
+    pub leaf_ids: Vec<usize>,
+    pub feature_names: Vec<String>,
+}
 
-/// Parse Newick string directly to succparen data structures without using phylotree
-fn parse_newick_to_succparen(
+impl NewDistUniFrac {
+    pub fn new(newick_str: &str, weighted: bool, feature_names: Vec<String>) -> Result<Self> {
+        let (post, kids, lens, leaf_ids) = parse_newick_to_custom(newick_str, &feature_names)?;
+        Ok(Self { weighted, post, kids, lens, leaf_ids, feature_names })
+    }
+
+    pub fn from_files(tree_file: &str, weighted: bool, feature_names: Vec<String>) -> Result<Self> {
+        let newick_str = std::fs::read_to_string(tree_file)
+            .map_err(|e| anyhow!("Failed to read tree file '{}': {}", tree_file, e))?;
+        Self::new(&newick_str, weighted, feature_names)
+    }
+
+    pub fn feature_names(&self) -> &[String] {
+        &self.feature_names
+    }
+
+    pub fn num_features(&self) -> usize {
+        self.feature_names.len()
+    }
+}
+
+impl Distance<f32> for NewDistUniFrac {
+    fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
+        let a: BitVec<u8, Lsb0> = va.iter().map(|&x| x > 0.0).collect();
+        let b: BitVec<u8, Lsb0> = vb.iter().map(|&x| x > 0.0).collect();
+        unifrac_pair(&self.lens, &self.leaf_ids, &a, &b) as f32
+    }
+}
+
+/// Simple Newick parser to custom data structures without using any external tree libraries
+fn parse_newick_to_custom(
     newick_str: &str,
     feature_names: &[String],
 ) -> Result<(Vec<usize>, Vec<Vec<usize>>, Vec<f32>, Vec<usize>)> {
@@ -966,52 +1004,10 @@ fn parse_newick_to_succparen(
         }
     }
 
-    // No longer need phylotree Tree - we use our own succinct data structures
     Ok((post, kids, lens, leaf_ids))
 }
 
-#[derive(Default, Clone)]
-pub struct NewDistUniFrac {
-    pub weighted: bool,
-    pub post: Vec<usize>,
-    pub kids: Vec<Vec<usize>>,
-    pub lens: Vec<f32>,
-    pub leaf_ids: Vec<usize>,
-    pub feature_names: Vec<String>,
-}
-
-impl Distance<f32> for NewDistUniFrac {
-    fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
-        let a: BitVec<u8, Lsb0> = va.iter().map(|&x| x > 0.0).collect();
-        let b: BitVec<u8, Lsb0> = vb.iter().map(|&x| x > 0.0).collect();
-        unifrac_pair(&self.post, &self.kids, &self.lens, &self.leaf_ids, &a, &b) as f32
-    }
-}
-
-impl NewDistUniFrac {
-    pub fn new(newick_str: &str, weighted: bool, feature_names: Vec<String>) -> Result<Self> {
-        let (post, kids, lens, leaf_ids) = parse_newick_to_succparen(newick_str, &feature_names)?;
-        Ok(Self { weighted, post, kids, lens, leaf_ids, feature_names })
-    }
-
-    pub fn from_files(tree_file: &str, weighted: bool, feature_names: Vec<String>) -> Result<Self> {
-        let newick_str = std::fs::read_to_string(tree_file)
-            .map_err(|e| anyhow!("Failed to read tree file '{}': {}", tree_file, e))?;
-        Self::new(&newick_str, weighted, feature_names)
-    }
-
-    pub fn feature_names(&self) -> &[String] {
-        &self.feature_names
-    }
-
-    pub fn num_features(&self) -> usize {
-        self.feature_names.len()
-    }
-}
-
 fn unifrac_pair(
-    post: &[usize],
-    kids: &[Vec<usize>],
     lens: &[f32],
     leaf_ids: &[usize],
     a: &BitVec<u8, Lsb0>,
@@ -1020,23 +1016,22 @@ fn unifrac_pair(
     const A_BIT: u8 = 0b01;
     const B_BIT: u8 = 0b10;
     let mut mask = vec![0u8; lens.len()];
+    
     for (leaf_pos, &nid) in leaf_ids.iter().enumerate() {
         if a[leaf_pos] { mask[nid] |= A_BIT; }
         if b[leaf_pos] { mask[nid] |= B_BIT; }
     }
-    for &v in post {
-        for &c in &kids[v] {
-            mask[v] |= mask[c];
-        }
-    }
+    
+    // Simple approach: just use the mask directly on branch lengths
     let (mut shared, mut union) = (0.0, 0.0);
-    for &v in post {
-        let m = mask[v];
+    for (i, &len) in lens.iter().enumerate() {
+        let m = mask[i];
         if m == 0 { continue }
-        let len = lens[v] as f64;
+        let len = len as f64;
         if m == A_BIT || m == B_BIT { union += len; }
         else { shared += len; union += len; }
     }
+    
     if union == 0.0 { 0.0 } else { 1.0 - shared / union }
 }
 
