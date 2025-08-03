@@ -994,13 +994,11 @@ fn parse_newick_to_custom(
     }
 
     let mut leaf_ids = Vec::new();
-    for node in &nodes {
-        if node.children.is_empty() {
-            if let Some(ref name) = node.name {
-                if feature_names.iter().any(|f| f == name) {
-                    leaf_ids.push(node.id);
-                }
-            }
+    for fname in feature_names {
+        if let Some(node) = nodes.iter().find(|n| n.name.as_deref() == Some(fname)) {
+            leaf_ids.push(node.id);
+        } else {
+            return Err(anyhow!("Feature '{}' not found in tree", fname));
         }
     }
 
