@@ -32,11 +32,16 @@ use log::debug;
 
 // for BitVec used in NewDistUniFrac
 use bitvec::{order::Lsb0, vec::BitVec};
-// use succparen::tree::{NodeId, SuccinctTree}; // Commented out until API is clarified
-
-// NewDistUniFrac uses succinct tree data structures for efficient representation
-
-// for DistCFnPtr_UniFrac  
+use newick::{one_from_string, NewickTree};
+use succparen::{
+    bitwise::SparseOneNnd,
+    tree::{
+        balanced_parens::{BalancedParensTree, Node as BpNode},
+        traversal::{DepthFirstTraverse, VisitNode},
+        LabelVec,
+    },
+};
+/// for DistCFnPtr_UniFrac
 use std::os::raw::{c_char, c_double, c_uint};
 use std::slice;
 
@@ -831,6 +836,7 @@ fn build_leaf_map(
 }
 
 // start of NewDistUniFrac
+// start of NewDistUniFrac
 
 #[derive(Default, Clone)]
 pub struct NewDistUniFrac {
@@ -888,7 +894,11 @@ impl NewDistUniFrac {
     }
 }
 
-impl Distance<f32> for NewDistUniFrac {
+pub trait DistanceCustom<T> {
+    fn eval(&self, va: &[T], vb: &[T]) -> f32;
+}
+
+impl DistanceCustom<f32> for NewDistUniFrac {
     fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
         let a: BitVec<u8, Lsb0> = va.iter().map(|&x| x > 0.0).collect();
         let b: BitVec<u8, Lsb0> = vb.iter().map(|&x| x > 0.0).collect();
@@ -1096,6 +1106,8 @@ fn parse_newick_to_structures(newick_str: &str) -> Result<(Vec<Vec<usize>>, Vec<
 
     Ok((kids, lens, post, leaf_ids, names))
 }
+
+// End of NewDistUniFrac
 
 // End of NewDistUniFrac
 
