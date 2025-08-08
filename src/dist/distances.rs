@@ -26,7 +26,7 @@ use num_traits::float::*;
 
 /// for DistUniFrac (original implementation only)
 use anyhow::{anyhow, Result};
-use phylotree::tree::{Tree, NodeId};
+use phylotree::tree::Tree;
 use std::collections::HashMap;
 use log::debug;
 
@@ -831,6 +831,7 @@ fn build_leaf_map(
 
 // start of NewDistUniFrac
 
+/// NewDistUniFrac (manual-newick parser version)
 #[derive(Default, Clone)]
 pub struct NewDistUniFrac {
     pub weighted: bool,
@@ -870,24 +871,24 @@ impl Distance<f32> for NewDistUniFrac {
     }
 }
 
-/// Simple Newick parser to custom data structures without using any external tree libraries
+/// --- Original manual Newick parser (keeps behavior identical) ---
+#[derive(Debug, Clone)]
+struct ParseNode {
+    id: usize,
+    name: Option<String>,
+    branch_length: f32,
+    children: Vec<usize>,
+    parent: Option<usize>,
+}
+
 fn parse_newick_to_custom(
     newick_str: &str,
     feature_names: &[String],
 ) -> Result<(Vec<usize>, Vec<Vec<usize>>, Vec<f32>, Vec<usize>)> {
-    let mut nodes = Vec::new();
+    let mut nodes = Vec::<ParseNode>::new();
     let mut stack = Vec::new();
     let mut current_node_id = 0;
     let mut chars = newick_str.trim_end_matches(';').chars().peekable();
-
-    #[derive(Debug, Clone)]
-    struct ParseNode {
-        id: usize,
-        name: Option<String>,
-        branch_length: f32,
-        children: Vec<usize>,
-        parent: Option<usize>,
-    }
 
     while let Some(ch) = chars.next() {
         match ch {
