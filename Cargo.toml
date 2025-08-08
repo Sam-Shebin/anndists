@@ -55,6 +55,7 @@ anyhow = { version = "1.0" }
 phylotree = { git = "https://github.com/lucblassel/phylotree-rs" }
 bitvec = { version = "1.0" }
 succparen = { version = "0.0.2" }
+newick = { version = "0.11" }
 
 # x86_64 simd stuff , enabled by  simdeez_f feature 
 simdeez = { version = "1.0", optional = true }

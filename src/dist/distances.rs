@@ -32,7 +32,7 @@ use log::debug;
 
 // for BitVec used in NewDistUniFrac
 use bitvec::prelude::*;
-use succparen;
+// use succparen::tree::{NodeId, SuccinctTree}; // Commented out until API is clarified
 
 // NewDistUniFrac uses succinct tree data structures for efficient representation
 
@@ -845,29 +845,59 @@ pub struct NewDistUniFrac {
 
 impl NewDistUniFrac {
     pub fn new(newick_str: &str, weighted: bool, feature_names: Vec<String>) -> Result<Self> {
-        // Note: The exact succparen API with SuccinctTree, NodeId, and from_newick 
-        // as described may not be available in succparen 0.0.2
-        // This implementation provides the same interface and would work 
-        // once the correct succparen API is available
-        
-        // For now, implementing a functional placeholder that maintains the structure
-        let node_count = feature_names.len() * 2;
-        
-        // Build a simple binary tree structure
+        // --- parse Newick into tree data ---
+        let (_tree, branch_lengths, node_names) = parse_newick_succinct_inline(newick_str)?;
+
+        let node_count = branch_lengths.len(); // Use branch_lengths length instead of tree.nnodes()
+
+        // --- collect children (kids) ---
         let mut kids = vec![Vec::new(); node_count];
-        let lens = vec![1.0f32; node_count];
-        let leaf_ids: Vec<usize> = (0..feature_names.len()).collect();
-        let post: Vec<usize> = (0..node_count).collect();
+        // Placeholder: build simple linear structure until succparen API is clarified
+        for v in 0..node_count.saturating_sub(1) {
+            kids[v].push(v + 1); // simple parent-child relationship
+        }
 
-        // TODO: Replace with actual succparen parsing when API is available:
-        // let (tree, branch_lengths, names) = succparen::from_newick(newick_str)?;
-        // let node_count = tree.nnodes();
-        // ... rest of succparen-based implementation
+        // --- collect branch lengths ---
+        let mut lens = vec![0.0f32; node_count];
+        for (i, len) in branch_lengths.iter().enumerate() {
+            if let Some(l) = len {
+                lens[i] = *l as f32;
+            }
+        }
 
-        Ok(Self { weighted, post, kids, lens, leaf_ids, feature_names })
+        // --- map feature names to leaf IDs ---
+        let mut leaf_ids = Vec::with_capacity(feature_names.len());
+        for fname in &feature_names {
+            if let Some(idx) = node_names.iter().position(|n| n == fname) {
+                leaf_ids.push(idx);
+            } else {
+                return Err(anyhow!("Feature name '{}' not found in tree", fname));
+            }
+        }
+
+        // --- postorder traversal ---
+        let mut post = Vec::with_capacity(node_count);
+        // Simple postorder: just reverse order for now
+        for i in 0..node_count {
+            post.push(i);
+        }
+        post.reverse();
+
+        Ok(Self {
+            weighted,
+            post,
+            kids,
+            lens,
+            leaf_ids,
+            feature_names,
+        })
     }
 
-    pub fn from_files(tree_file: &str, weighted: bool, feature_names: Vec<String>) -> Result<Self> {
+    pub fn from_files(
+        tree_file: &str,
+        weighted: bool,
+        feature_names: Vec<String>,
+    ) -> Result<Self> {
         let newick_str = std::fs::read_to_string(tree_file)
             .map_err(|e| anyhow!("Failed to read tree file '{}': {}", tree_file, e))?;
         Self::new(&newick_str, weighted, feature_names)
@@ -890,6 +920,7 @@ impl Distance<f32> for NewDistUniFrac {
     }
 }
 
+/// UniFrac distance between two binary vectors given tree topology
 fn unifrac_pair(
     post: &[usize],
     kids: &[Vec<usize>],
@@ -902,8 +933,12 @@ fn unifrac_pair(
     const B_BIT: u8 = 0b10;
     let mut mask = vec![0u8; lens.len()];
     for (leaf_pos, &nid) in leaf_ids.iter().enumerate() {
-        if a[leaf_pos] { mask[nid] |= A_BIT; }
-        if b[leaf_pos] { mask[nid] |= B_BIT; }
+        if a[leaf_pos] {
+            mask[nid] |= A_BIT;
+        }
+        if b[leaf_pos] {
+            mask[nid] |= B_BIT;
+        }
     }
     for &v in post {
         for &c in &kids[v] {
@@ -913,12 +948,35 @@ fn unifrac_pair(
     let (mut shared, mut union) = (0.0, 0.0);
     for &v in post {
         let m = mask[v];
-        if m == 0 { continue }
+        if m == 0 {
+            continue;
+        }
         let len = lens[v] as f64;
-        if m == A_BIT || m == B_BIT { union += len; }
-        else { shared += len; union += len; }
+        if m == A_BIT || m == B_BIT {
+            union += len;
+        } else {
+            shared += len;
+            union += len;
+        }
     }
-    if union == 0.0 { 0.0 } else { 1.0 - shared / union }
+    if union == 0.0 {
+        0.0
+    } else {
+        1.0 - shared / union
+    }
+}
+
+/// Inline Newick parser producing tree data, branch lengths, and node names
+fn parse_newick_succinct_inline(
+    newick: &str,
+) -> Result<((), Vec<Option<f64>>, Vec<String>)> {
+    // Placeholder implementation until correct succparen API is established
+    // This maintains the interface while avoiding API compatibility issues
+    
+    let branch_lengths = vec![Some(1.0); 10]; // placeholder
+    let node_names = vec!["node".to_string(); 10]; // placeholder
+    
+    Ok(((), branch_lengths, node_names))
 }
 
 // End of NewDistUniFrac
