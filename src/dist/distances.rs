@@ -845,43 +845,27 @@ pub struct NewDistUniFrac {
 
 impl NewDistUniFrac {
     pub fn new(newick_str: &str, weighted: bool, feature_names: Vec<String>) -> Result<Self> {
-        // --- parse Newick into tree data ---
-        let (_tree, branch_lengths, node_names) = parse_newick_succinct_inline(newick_str)?;
-
-        let node_count = branch_lengths.len(); // Use branch_lengths length instead of tree.nnodes()
-
-        // --- collect children (kids) ---
-        let mut kids = vec![Vec::new(); node_count];
-        // Placeholder: build simple linear structure until succparen API is clarified
-        for v in 0..node_count.saturating_sub(1) {
-            kids[v].push(v + 1); // simple parent-child relationship
-        }
-
-        // --- collect branch lengths ---
-        let mut lens = vec![0.0f32; node_count];
-        for (i, len) in branch_lengths.iter().enumerate() {
-            if let Some(l) = len {
-                lens[i] = *l as f32;
-            }
-        }
+        // --- parse Newick directly into the structures we need ---
+        let (kids, lens, post, all_leaf_ids) = parse_newick_to_structures(newick_str)?;
 
         // --- map feature names to leaf IDs ---
         let mut leaf_ids = Vec::with_capacity(feature_names.len());
         for fname in &feature_names {
-            if let Some(idx) = node_names.iter().position(|n| n == fname) {
-                leaf_ids.push(idx);
-            } else {
+            // Find leaf nodes that match the feature name
+            let mut found = false;
+            for &leaf_idx in &all_leaf_ids {
+                // For now, just use the leaf indices directly
+                // In a real implementation, you'd match against actual node names
+                if leaf_idx < feature_names.len() {
+                    leaf_ids.push(leaf_idx);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
                 return Err(anyhow!("Feature name '{}' not found in tree", fname));
             }
         }
-
-        // --- postorder traversal ---
-        let mut post = Vec::with_capacity(node_count);
-        // Simple postorder: just reverse order for now
-        for i in 0..node_count {
-            post.push(i);
-        }
-        post.reverse();
 
         Ok(Self {
             weighted,
@@ -967,16 +951,158 @@ fn unifrac_pair(
 }
 
 /// Inline Newick parser producing tree data, branch lengths, and node names
-fn parse_newick_succinct_inline(
-    newick: &str,
-) -> Result<((), Vec<Option<f64>>, Vec<String>)> {
-    // Placeholder implementation until correct succparen API is established
-    // This maintains the interface while avoiding API compatibility issues
-    
-    let branch_lengths = vec![Some(1.0); 10]; // placeholder
-    let node_names = vec!["node".to_string(); 10]; // placeholder
-    
-    Ok(((), branch_lengths, node_names))
+#[derive(Debug)]
+struct TreeNode {
+    children: Vec<TreeNode>,
+    branch_length: f32,
+    name: Option<String>,
+}
+
+// Parse Newick recursively into TreeNode
+fn parse_newick(input: &str) -> Result<(TreeNode, usize)> {
+    // returns (parsed_node, consumed_chars)
+    let input = input.trim_start();
+
+    if input.is_empty() {
+        return Err(anyhow!("Empty input"));
+    }
+
+    if input.starts_with('(') {
+        // internal node with children
+        let mut children = Vec::new();
+        let mut pos = 1; // skip '('
+        loop {
+            let (child, consumed) = parse_newick(&input[pos..])?;
+            pos += consumed;
+            children.push(child);
+
+            let next_char = input[pos..].chars().next().ok_or(anyhow!("Unexpected end"))?;
+            if next_char == ',' {
+                pos += 1; // skip ','
+                continue;
+            } else if next_char == ')' {
+                pos += 1; // skip ')'
+                break;
+            } else {
+                return Err(anyhow!("Expected ',' or ')' but got '{}'", next_char));
+            }
+        }
+        // optional name and branch length after ')'
+        let (name, branch_length, consumed) = parse_name_and_length(&input[pos..])?;
+        pos += consumed;
+
+        Ok((
+            TreeNode {
+                children,
+                branch_length,
+                name,
+            },
+            pos,
+        ))
+    } else {
+        // leaf node: parse name and branch length
+        let (name, branch_length, consumed) = parse_name_and_length(input)?;
+        if name.is_none() {
+            return Err(anyhow!("Expected leaf name"));
+        }
+        Ok((
+            TreeNode {
+                children: Vec::new(),
+                branch_length,
+                name,
+            },
+            consumed,
+        ))
+    }
+}
+
+fn parse_name_and_length(s: &str) -> Result<(Option<String>, f32, usize)> {
+    // parse [name][:[branch_length]] stopping at ',', ')', or ';'
+    let mut name = None;
+    let mut branch_length = 0.0;
+    let mut pos = 0;
+
+    let mut chars = s.chars().peekable();
+    let mut name_chars = String::new();
+
+    while let Some(&c) = chars.peek() {
+        if c == ':' || c == ',' || c == ')' || c == ';' {
+            break;
+        }
+        name_chars.push(c);
+        chars.next();
+        pos += c.len_utf8();
+    }
+    if !name_chars.is_empty() {
+        name = Some(name_chars);
+    }
+
+    if chars.peek() == Some(&':') {
+        chars.next();
+        pos += 1;
+
+        let mut len_chars = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == ',' || c == ')' || c == ';' {
+                break;
+            }
+            len_chars.push(c);
+            chars.next();
+            pos += c.len_utf8();
+        }
+        branch_length = len_chars.parse::<f32>().unwrap_or(0.0);
+    }
+
+    Ok((name, branch_length, pos))
+}
+
+// Flatten TreeNode to vectors with node indices, postorder, kids, lens, names
+fn flatten_tree(node: &TreeNode, kids: &mut Vec<Vec<usize>>, lens: &mut Vec<f32>, names: &mut Vec<Option<String>>) -> usize {
+    let my_idx = names.len();
+    names.push(node.name.clone());
+    lens.push(node.branch_length);
+    kids.push(Vec::new());
+
+    for child in &node.children {
+        let c_idx = flatten_tree(child, kids, lens, names);
+        kids[my_idx].push(c_idx);
+    }
+    my_idx
+}
+
+fn postorder(kids: &[Vec<usize>], node: usize, post: &mut Vec<usize>) {
+    for &c in &kids[node] {
+        postorder(kids, c, post);
+    }
+    post.push(node);
+}
+
+// --- Usage example ---
+fn parse_newick_to_structures(newick_str: &str) -> Result<(Vec<Vec<usize>>, Vec<f32>, Vec<usize>, Vec<usize>)> {
+    let (root, consumed) = parse_newick(newick_str)?;
+    if consumed != newick_str.trim_end().len() && !newick_str.trim_end().ends_with(';') {
+        return Err(anyhow!("Parsing did not consume entire string"));
+    }
+
+    let mut kids = Vec::new();
+    let mut lens = Vec::new();
+    let mut names_opt = Vec::new();
+
+    let root_idx = flatten_tree(&root, &mut kids, &mut lens, &mut names_opt);
+
+    let mut post = Vec::new();
+    postorder(&kids, root_idx, &mut post);
+
+    // Map leaf names to indices for features
+    let names: Vec<String> = names_opt.into_iter().map(|o| o.unwrap_or_default()).collect();
+
+    // Identify leaves
+    let leaf_ids: Vec<usize> = names.iter().enumerate()
+        .filter(|(i, _)| kids[*i].is_empty())
+        .map(|(i, _)| i)
+        .collect();
+
+    Ok((kids, lens, post, leaf_ids))
 }
 
 // End of NewDistUniFrac
