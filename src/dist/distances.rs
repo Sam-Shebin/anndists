@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use log::debug;
 
 // for BitVec used in NewDistUniFrac
-use bitvec::prelude::*;
+use bitvec::{order::Lsb0, vec::BitVec};
 // use succparen::tree::{NodeId, SuccinctTree}; // Commented out until API is clarified
 
 // NewDistUniFrac uses succinct tree data structures for efficient representation
@@ -832,7 +832,6 @@ fn build_leaf_map(
 
 // start of NewDistUniFrac
 
-/// NewDistUniFrac (succparen-based version)
 #[derive(Default, Clone)]
 pub struct NewDistUniFrac {
     pub weighted: bool,
@@ -845,24 +844,17 @@ pub struct NewDistUniFrac {
 
 impl NewDistUniFrac {
     pub fn new(newick_str: &str, weighted: bool, feature_names: Vec<String>) -> Result<Self> {
-        // --- parse Newick directly into the structures we need ---
-        let (kids, lens, post, all_leaf_ids) = parse_newick_to_structures(newick_str)?;
+        // Parse Newick string into tree data
+        let (kids, lens, post, all_leaf_ids, all_names) = parse_newick_to_structures(newick_str)?;
 
-        // --- map feature names to leaf IDs ---
+        // Map feature names to leaf node indices by matching names
         let mut leaf_ids = Vec::with_capacity(feature_names.len());
         for fname in &feature_names {
-            // Find leaf nodes that match the feature name
-            let mut found = false;
-            for &leaf_idx in &all_leaf_ids {
-                // For now, just use the leaf indices directly
-                // In a real implementation, you'd match against actual node names
-                if leaf_idx < feature_names.len() {
-                    leaf_ids.push(leaf_idx);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
+            let pos = all_leaf_ids.iter()
+                .find(|&&leaf_idx| all_names[leaf_idx] == *fname);
+            if let Some(&leaf_idx) = pos {
+                leaf_ids.push(leaf_idx);
+            } else {
                 return Err(anyhow!("Feature name '{}' not found in tree", fname));
             }
         }
@@ -1078,7 +1070,7 @@ fn postorder(kids: &[Vec<usize>], node: usize, post: &mut Vec<usize>) {
 }
 
 // --- Usage example ---
-fn parse_newick_to_structures(newick_str: &str) -> Result<(Vec<Vec<usize>>, Vec<f32>, Vec<usize>, Vec<usize>)> {
+fn parse_newick_to_structures(newick_str: &str) -> Result<(Vec<Vec<usize>>, Vec<f32>, Vec<usize>, Vec<usize>, Vec<String>)> {
     let (root, consumed) = parse_newick(newick_str)?;
     if consumed != newick_str.trim_end().len() && !newick_str.trim_end().ends_with(';') {
         return Err(anyhow!("Parsing did not consume entire string"));
@@ -1102,7 +1094,7 @@ fn parse_newick_to_structures(newick_str: &str) -> Result<(Vec<Vec<usize>>, Vec<
         .map(|(i, _)| i)
         .collect();
 
-    Ok((kids, lens, post, leaf_ids))
+    Ok((kids, lens, post, leaf_ids, names))
 }
 
 // End of NewDistUniFrac
