@@ -31,16 +31,10 @@ use std::collections::HashMap;
 use log::debug;
 
 // for BitVec used in NewDistUniFrac
-use bitvec::{order::Lsb0, vec::BitVec};
-use newick::{one_from_string, NewickTree};
-use succparen::{
-    bitwise::SparseOneNnd,
-    tree::{
-        balanced_parens::{BalancedParensTree, Node as BpNode},
-        traversal::{DepthFirstTraverse, VisitNode},
-        LabelVec,
-    },
-};
+use bitvec::prelude::*;
+use newick::Newick;
+use succparen::tree::Node;
+
 /// for DistCFnPtr_UniFrac
 use std::os::raw::{c_char, c_double, c_uint};
 use std::slice;
@@ -836,7 +830,6 @@ fn build_leaf_map(
 }
 
 // start of NewDistUniFrac
-// start of NewDistUniFrac
 
 #[derive(Default, Clone)]
 pub struct NewDistUniFrac {
@@ -850,16 +843,15 @@ pub struct NewDistUniFrac {
 
 impl NewDistUniFrac {
     pub fn new(newick_str: &str, weighted: bool, feature_names: Vec<String>) -> Result<Self> {
-        // Parse Newick string into tree data
-        let (kids, lens, post, all_leaf_ids, all_names) = parse_newick_to_structures(newick_str)?;
+        let (kids, lens, post, leaf_ids, names) = parse_newick_to_structures(newick_str)?;
 
         // Map feature names to leaf node indices by matching names
-        let mut leaf_ids = Vec::with_capacity(feature_names.len());
+        let mut leaf_ids_mapped = Vec::with_capacity(feature_names.len());
         for fname in &feature_names {
-            let pos = all_leaf_ids.iter()
-                .find(|&&leaf_idx| all_names[leaf_idx] == *fname);
+            let pos = leaf_ids.iter()
+                .find(|&&leaf_idx| names[leaf_idx] == *fname);
             if let Some(&leaf_idx) = pos {
-                leaf_ids.push(leaf_idx);
+                leaf_ids_mapped.push(leaf_idx);
             } else {
                 return Err(anyhow!("Feature name '{}' not found in tree", fname));
             }
@@ -870,16 +862,12 @@ impl NewDistUniFrac {
             post,
             kids,
             lens,
-            leaf_ids,
+            leaf_ids: leaf_ids_mapped,
             feature_names,
         })
     }
 
-    pub fn from_files(
-        tree_file: &str,
-        weighted: bool,
-        feature_names: Vec<String>,
-    ) -> Result<Self> {
+    pub fn from_files(tree_file: &str, weighted: bool, feature_names: Vec<String>) -> Result<Self> {
         let newick_str = std::fs::read_to_string(tree_file)
             .map_err(|e| anyhow!("Failed to read tree file '{}': {}", tree_file, e))?;
         Self::new(&newick_str, weighted, feature_names)
@@ -894,19 +882,18 @@ impl NewDistUniFrac {
     }
 }
 
-pub trait DistanceCustom<T> {
-    fn eval(&self, va: &[T], vb: &[T]) -> f32;
+pub trait NewDistUniFrac_Distance<T> {
+    fn distance(&self, va: &[T], vb: &[T]) -> f64;
 }
 
-impl DistanceCustom<f32> for NewDistUniFrac {
-    fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
+impl NewDistUniFrac_Distance<f32> for NewDistUniFrac {
+    fn distance(&self, va: &[f32], vb: &[f32]) -> f64 {
         let a: BitVec<u8, Lsb0> = va.iter().map(|&x| x > 0.0).collect();
         let b: BitVec<u8, Lsb0> = vb.iter().map(|&x| x > 0.0).collect();
-        unifrac_pair(&self.post, &self.kids, &self.lens, &self.leaf_ids, &a, &b) as f32
+        unifrac_pair(&self.post, &self.kids, &self.lens, &self.leaf_ids, &a, &b)
     }
 }
 
-/// UniFrac distance between two binary vectors given tree topology
 fn unifrac_pair(
     post: &[usize],
     kids: &[Vec<usize>],
@@ -952,7 +939,8 @@ fn unifrac_pair(
     }
 }
 
-/// Inline Newick parser producing tree data, branch lengths, and node names
+// -- Newick parsing and flattening --
+
 #[derive(Debug)]
 struct TreeNode {
     children: Vec<TreeNode>,
@@ -960,9 +948,7 @@ struct TreeNode {
     name: Option<String>,
 }
 
-// Parse Newick recursively into TreeNode
 fn parse_newick(input: &str) -> Result<(TreeNode, usize)> {
-    // returns (parsed_node, consumed_chars)
     let input = input.trim_start();
 
     if input.is_empty() {
@@ -970,9 +956,8 @@ fn parse_newick(input: &str) -> Result<(TreeNode, usize)> {
     }
 
     if input.starts_with('(') {
-        // internal node with children
         let mut children = Vec::new();
-        let mut pos = 1; // skip '('
+        let mut pos = 1;
         loop {
             let (child, consumed) = parse_newick(&input[pos..])?;
             pos += consumed;
@@ -980,46 +965,29 @@ fn parse_newick(input: &str) -> Result<(TreeNode, usize)> {
 
             let next_char = input[pos..].chars().next().ok_or(anyhow!("Unexpected end"))?;
             if next_char == ',' {
-                pos += 1; // skip ','
+                pos += 1;
                 continue;
             } else if next_char == ')' {
-                pos += 1; // skip ')'
+                pos += 1;
                 break;
             } else {
                 return Err(anyhow!("Expected ',' or ')' but got '{}'", next_char));
             }
         }
-        // optional name and branch length after ')'
         let (name, branch_length, consumed) = parse_name_and_length(&input[pos..])?;
         pos += consumed;
 
-        Ok((
-            TreeNode {
-                children,
-                branch_length,
-                name,
-            },
-            pos,
-        ))
+        Ok((TreeNode { children, branch_length, name }, pos))
     } else {
-        // leaf node: parse name and branch length
         let (name, branch_length, consumed) = parse_name_and_length(input)?;
         if name.is_none() {
             return Err(anyhow!("Expected leaf name"));
         }
-        Ok((
-            TreeNode {
-                children: Vec::new(),
-                branch_length,
-                name,
-            },
-            consumed,
-        ))
+        Ok((TreeNode { children: Vec::new(), branch_length, name }, consumed))
     }
 }
 
 fn parse_name_and_length(s: &str) -> Result<(Option<String>, f32, usize)> {
-    // parse [name][:[branch_length]] stopping at ',', ')', or ';'
     let mut name = None;
     let mut branch_length = 0.0;
     let mut pos = 0;
@@ -1058,7 +1026,6 @@ fn parse_name_and_length(s: &str) -> Result<(Option<String>, f32, usize)> {
     Ok((name, branch_length, pos))
 }
 
-// Flatten TreeNode to vectors with node indices, postorder, kids, lens, names
 fn flatten_tree(node: &TreeNode, kids: &mut Vec<Vec<usize>>, lens: &mut Vec<f32>, names: &mut Vec<Option<String>>) -> usize {
     let my_idx = names.len();
     names.push(node.name.clone());
@@ -1079,7 +1046,6 @@ fn postorder(kids: &[Vec<usize>], node: usize, post: &mut Vec<usize>) {
     post.push(node);
 }
 
-// --- Usage example ---
 fn parse_newick_to_structures(newick_str: &str) -> Result<(Vec<Vec<usize>>, Vec<f32>, Vec<usize>, Vec<usize>, Vec<String>)> {
     let (root, consumed) = parse_newick(newick_str)?;
     if consumed != newick_str.trim_end().len() && !newick_str.trim_end().ends_with(';') {
@@ -1095,19 +1061,16 @@ fn parse_newick_to_structures(newick_str: &str) -> Result<(Vec<Vec<usize>>, Vec<
     let mut post = Vec::new();
     postorder(&kids, root_idx, &mut post);
 
-    // Map leaf names to indices for features
     let names: Vec<String> = names_opt.into_iter().map(|o| o.unwrap_or_default()).collect();
 
-    // Identify leaves
-    let leaf_ids: Vec<usize> = names.iter().enumerate()
+    let leaf_ids: Vec<usize> = names.iter()
+        .enumerate()
         .filter(|(i, _)| kids[*i].is_empty())
         .map(|(i, _)| i)
         .collect();
 
     Ok((kids, lens, post, leaf_ids, names))
 }
-
-// End of NewDistUniFrac
 
 // End of NewDistUniFrac
 
