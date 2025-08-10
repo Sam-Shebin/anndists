@@ -1,0 +1,32 @@
+   Compiling anndists v0.1.2 (C:\Users\shebi\OneDrive\Desktop\rust\anndists)
+warning: unused import: `log::debug`
+    --> src\dist\distances.rs:1606:9
+     |
+1606 |     use log::debug;
+     |         ^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::ptr`
+    --> src\dist\distances.rs:1609:9
+     |
+1609 |     use std::ptr;
+     |         ^^^^^^^^
+
+error[E0425]: cannot find function `parse_counts_format` in this scope
+    --> src\dist\distances.rs:2472:54
+     |
+2472 |         let (feature_names, samples, sample_names) = parse_counts_format(&lines);
+     |                                                      ^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+warning: unused variable: `node_name_map`
+   --> src\dist\distances.rs:816:5
+    |
+816 |     node_name_map: &[Option<String>],
+    |     ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_node_name_map`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+For more information about this error, try `rustc --explain E0425`.
+warning: `anndists` (lib test) generated 3 warnings
+error: could not compile `anndists` (lib test) due to 1 previous error; 3 warnings emitted
