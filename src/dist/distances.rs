@@ -61,6 +61,8 @@ enum DistKind {
     DistJensenShannon(String),
     /// UniFrac distance 
     DistUniFrac(String),
+    /// New UniFrac distance using succparen for high performance
+    NewDistUniFrac(String),
     /// To store a distance defined by a C pointer function
     DistCFnPtr,
     /// To store a distance defined by a UniFrac C pointer function, see here: https://github.com/sfiligoi/unifrac-binaries/tree/simple1_250107
