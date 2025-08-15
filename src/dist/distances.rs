@@ -883,13 +883,14 @@ impl NewDistUniFrac {
             }
         }
         
-        // Extract leaf names from NewickTree using proper API
-        // The newick crate stores names differently - let's iterate through leaves
-        for leaf_node in t.leaves() {
-            if let Some(name) = t.name(leaf_node) {
+        // Extract leaf names using BP-derived leaf_ids as driver (not phylotree ordering)
+        // Match BP IDs to Newick node IDs to get names in correct BP order
+        for &bp_leaf_id in &leaf_ids {
+            // BP ID should correspond to Newick node ID due to SuccTrav visiting in Newick order
+            if let Some(name) = t.name(bp_leaf_id) {
                 leaf_nm.push(name.to_owned());
             } else {
-                leaf_nm.push(format!("L{}", leaf_node));
+                leaf_nm.push(format!("L{}", bp_leaf_id));
             }
         }
 
