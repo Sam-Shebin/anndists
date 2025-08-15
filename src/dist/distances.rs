@@ -2770,15 +2770,23 @@ mod tests {
         let newick_str = "((T1:0.1,T2:0.2):0.05,(T3:0.3,T4:0.4):0.1):0.0;";
         let feature_names = vec!["T1".to_string(), "T2".to_string(), "T3".to_string(), "T4".to_string()];
         
-        let dist_unifrac = NewDistUniFrac::new(newick_str, false, feature_names).unwrap();
+        let new_dist = NewDistUniFrac::new(newick_str, false, feature_names.clone()).unwrap();
+        let orig_dist = DistUniFrac::new(newick_str, false, feature_names).unwrap();
         
-        // Completely different samples should have distance > 0
+        // Completely different samples - validate against original implementation
         let va = vec![1.0, 1.0, 0.0, 0.0]; // T1, T2 present
         let vb = vec![0.0, 0.0, 1.0, 1.0]; // T3, T4 present
         
-        let distance = dist_unifrac.eval(&va, &vb);
-        println!("Distance between completely different samples: {}", distance);
-        assert!(distance > 0.5, "Distance should be substantial for completely different samples, got {}", distance);
+        let new_distance = new_dist.eval(&va, &vb);
+        let orig_distance = orig_dist.eval(&va, &vb);
+        
+        println!("NewDistUniFrac distance: {}, Original distance: {}", new_distance, orig_distance);
+        assert!((new_distance - orig_distance).abs() < 0.01, 
+            "NewDistUniFrac ({}) should match original ({}) within 0.01 tolerance", 
+            new_distance, orig_distance);
+        
+        // Also verify it's a substantial distance as expected
+        assert!(new_distance > 0.5, "Distance should be substantial for completely different samples, got {}", new_distance);
     }
 
     #[test]
@@ -2805,21 +2813,33 @@ mod tests {
         let newick_str = "((T1:0.1,T2:0.2):0.05,(T3:0.3,T4:0.4):0.1):0.0;";
         let feature_names = vec!["T1".to_string(), "T2".to_string(), "T3".to_string(), "T4".to_string()];
         
-        let dist_unifrac = NewDistUniFrac::new(newick_str, false, feature_names).unwrap();
+        let new_dist = NewDistUniFrac::new(newick_str, false, feature_names.clone()).unwrap();
+        let orig_dist = DistUniFrac::new(newick_str, false, feature_names).unwrap();
         
-        // One sample has only T1, other has only T2 (sister taxa)
+        // Test T1 vs T2 (sister taxa) - validate against original
         let va = vec![1.0, 0.0, 0.0, 0.0]; // Only T1
         let vb = vec![0.0, 1.0, 0.0, 0.0]; // Only T2
         
-        let distance = dist_unifrac.eval(&va, &vb);
-        println!("Distance between sister taxa: {}", distance);
-        assert!(distance > 0.0 && distance < 1.0, "Distance should be between 0 and 1, got {}", distance);
+        let new_distance = new_dist.eval(&va, &vb);
+        let orig_distance = orig_dist.eval(&va, &vb);
         
-        // T1 vs T3 should be larger (more distant in tree)
+        println!("Sister taxa - NewDistUniFrac: {}, Original: {}", new_distance, orig_distance);
+        assert!((new_distance - orig_distance).abs() < 0.01, 
+            "NewDistUniFrac ({}) should match original ({}) within 0.01 tolerance", 
+            new_distance, orig_distance);
+        
+        // Test T1 vs T3 (more distant) - validate against original
         let vc = vec![0.0, 0.0, 1.0, 0.0]; // Only T3
-        let distance2 = dist_unifrac.eval(&va, &vc);
-        println!("Distance between distant taxa: {}", distance2);
-        assert!(distance2 > distance, "More distant taxa should have larger distance");
+        let new_distance2 = new_dist.eval(&va, &vc);
+        let orig_distance2 = orig_dist.eval(&va, &vc);
+        
+        println!("Distant taxa - NewDistUniFrac: {}, Original: {}", new_distance2, orig_distance2);
+        assert!((new_distance2 - orig_distance2).abs() < 0.01, 
+            "NewDistUniFrac ({}) should match original ({}) within 0.01 tolerance", 
+            new_distance2, orig_distance2);
+        
+        // Verify distance ordering is preserved
+        assert!(new_distance2 > new_distance, "More distant taxa should have larger distance");
     }
 
     #[test]
@@ -3059,27 +3079,41 @@ mod tests {
     fn test_new_dist_unifrac_large_tree() {
         init_log();
         
-        // Larger tree with more taxa
+        // Larger tree with more taxa - validate against original implementation
         let newick_str = "(((T1:0.1,T2:0.1):0.05,(T3:0.1,T4:0.1):0.05):0.1,((T5:0.1,T6:0.1):0.05,(T7:0.1,T8:0.1):0.05):0.1):0.0;";
         let feature_names = vec![
             "T1".to_string(), "T2".to_string(), "T3".to_string(), "T4".to_string(),
             "T5".to_string(), "T6".to_string(), "T7".to_string(), "T8".to_string()
         ];
         
-        let dist_unifrac = NewDistUniFrac::new(newick_str, false, feature_names).unwrap();
+        let new_dist = NewDistUniFrac::new(newick_str, false, feature_names.clone()).unwrap();
+        let orig_dist = DistUniFrac::new(newick_str, false, feature_names).unwrap();
         
-        // Test with various sample configurations
+        // Test completely different clades - validate against original
         let va = vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]; // First 4 taxa
         let vb = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]; // Last 4 taxa
         
-        let distance = dist_unifrac.eval(&va, &vb);
-        println!("Distance in large tree: {}", distance);
-        assert!(distance > 0.0, "Should have positive distance for different clades");
+        let new_distance = new_dist.eval(&va, &vb);
+        let orig_distance = orig_dist.eval(&va, &vb);
         
-        // Test overlapping samples
-        let vc = vec![1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]; // Mixed
-        let distance2 = dist_unifrac.eval(&va, &vc);
-        assert!(distance2 < distance, "Overlapping samples should have smaller distance");
+        println!("Large tree different clades - NewDistUniFrac: {}, Original: {}", new_distance, orig_distance);
+        assert!((new_distance - orig_distance).abs() < 0.01, 
+            "NewDistUniFrac ({}) should match original ({}) within 0.01 tolerance", 
+            new_distance, orig_distance);
+        
+        // Test overlapping samples - validate against original
+        let vc = vec![1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]; // Mixed across clades
+        let new_distance2 = new_dist.eval(&va, &vc);
+        let orig_distance2 = orig_dist.eval(&va, &vc);
+        
+        println!("Large tree overlapping - NewDistUniFrac: {}, Original: {}", new_distance2, orig_distance2);
+        assert!((new_distance2 - orig_distance2).abs() < 0.01, 
+            "NewDistUniFrac ({}) should match original ({}) within 0.01 tolerance", 
+            new_distance2, orig_distance2);
+        
+        // Verify distance ordering is preserved
+        assert!(new_distance2 < new_distance, 
+            "Overlapping samples should have smaller distance ({} < {})", new_distance2, new_distance);
     }
 
     #[test]
@@ -3114,24 +3148,36 @@ mod tests {
         let newick_str = "((T1:0.1,T2:0.2):0.05,(T3:0.3,T4:0.4):0.1):0.0;";
         let feature_names = vec!["T1".to_string(), "T2".to_string(), "T3".to_string(), "T4".to_string()];
         
-        let dist_unifrac = NewDistUniFrac::new(newick_str, false, feature_names).unwrap();
+        let new_dist = NewDistUniFrac::new(newick_str, false, feature_names.clone()).unwrap();
+        let orig_dist = DistUniFrac::new(newick_str, false, feature_names).unwrap();
         
-        // Test that presence/absence conversion works correctly
+        // Test presence/absence conversion with varying abundances - validate against original
         let va = vec![0.5, 0.0, 1.5, 0.0]; // T1 and T3 present (> 0)
         let vb = vec![0.0, 2.0, 0.0, 0.1]; // T2 and T4 present (> 0)
         
-        let distance = dist_unifrac.eval(&va, &vb);
-        assert!(distance > 0.0, "Should have positive distance for different presence patterns");
+        let new_distance = new_dist.eval(&va, &vb);
+        let orig_distance = orig_dist.eval(&va, &vb);
         
-        // Test with threshold values
+        println!("Bitvec conversion - NewDistUniFrac: {}, Original: {}", new_distance, orig_distance);
+        assert!((new_distance - orig_distance).abs() < 0.01, 
+            "NewDistUniFrac ({}) should match original ({}) within 0.01 tolerance", 
+            new_distance, orig_distance);
+        
+        // Test with very small positive values - validate against original
         let vc = vec![0.0001, 0.0, 0.0001, 0.0]; // Very small positive values
         let vd = vec![0.0, 0.0001, 0.0, 0.0001]; 
         
-        let distance2 = dist_unifrac.eval(&vc, &vd);
-        assert!(distance2 > 0.0, "Even tiny positive values should be considered present");
+        let new_distance2 = new_dist.eval(&vc, &vd);
+        let orig_distance2 = orig_dist.eval(&vc, &vd);
         
-        // Should be same as the first test (presence/absence only matters)
-        assert!((distance - distance2).abs() < 1e-6, "Distance should only depend on presence/absence");
+        println!("Small values - NewDistUniFrac: {}, Original: {}", new_distance2, orig_distance2);
+        assert!((new_distance2 - orig_distance2).abs() < 0.01, 
+            "NewDistUniFrac ({}) should match original ({}) within 0.01 tolerance", 
+            new_distance2, orig_distance2);
+        
+        // Both should give same result (presence/absence only matters)
+        assert!((new_distance - new_distance2).abs() < 1e-6, 
+            "Distance should only depend on presence/absence, got {} vs {}", new_distance, new_distance2);
     }
 
     #[test]
