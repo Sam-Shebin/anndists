@@ -872,15 +872,24 @@ impl NewDistUniFrac {
         let mut post = Vec::<usize>::with_capacity(total);
         collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
 
-        // 4. Extract leaf nodes and names (EXACTLY same as unifrac_bp)
+        // 4. Extract leaf nodes using succparen only (no phylotree-rs dependencies)
         let mut leaf_ids = Vec::<usize>::new();
         let mut leaf_nm = Vec::<String>::new();
-        for n in t.nodes() {
-            if t[n].is_leaf() {
-                leaf_ids.push(n);
-                leaf_nm.push(
-                    t.name(n).map(ToOwned::to_owned).unwrap_or_else(|| format!("L{n}")),
-                );
+        
+        // Find leaves using succparen: nodes with no children in kids array
+        for node_id in 0..total {
+            if kids[node_id].is_empty() {
+                leaf_ids.push(node_id);
+            }
+        }
+        
+        // Extract leaf names from NewickTree using proper API
+        // The newick crate stores names differently - let's iterate through leaves
+        for leaf_node in t.leaves() {
+            if let Some(name) = t.name(leaf_node) {
+                leaf_nm.push(name.to_owned());
+            } else {
+                leaf_nm.push(format!("L{}", leaf_node));
             }
         }
 
