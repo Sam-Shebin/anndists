@@ -922,13 +922,18 @@ impl NewDistUniFrac {
 
 impl Distance<f32> for NewDistUniFrac {
     fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
-        // Use the same normalization approach as original DistUniFrac
-        // but with succparen-based tree structure
-        unifrac_succparen_normalized(&self.post, &self.kids, &self.lens, &self.leaf_ids, va, vb) as f32
+        unifrac_succparen_normalized(
+            &self.post,
+            &self.kids,
+            &self.lens,
+            &self.leaf_ids,
+            va,
+            vb,
+        ) as f32
     }
 }
 
-/// UniFrac using succparen tree structure with sample normalization (matches original DistUniFrac)
+/// UniFrac using succparen tree structure with normalization
 fn unifrac_succparen_normalized(
     post: &[usize],
     kids: &[Vec<usize>],
@@ -937,11 +942,9 @@ fn unifrac_succparen_normalized(
     va: &[f32],
     vb: &[f32],
 ) -> f64 {
-    // Convert to presence/absence and normalize samples like original DistUniFrac
     let mut local_a: Vec<f32> = va.iter().map(|&x| if x > 0.0 { 1.0 } else { 0.0 }).collect();
     let mut local_b: Vec<f32> = vb.iter().map(|&x| if x > 0.0 { 1.0 } else { 0.0 }).collect();
     
-    // Normalize each sample by sum of present features (like original)
     let sum_a: f32 = local_a.iter().sum();
     let sum_b: f32 = local_b.iter().sum();
     
@@ -958,10 +961,7 @@ fn unifrac_succparen_normalized(
         }
     }
     
-    // Create partial sums array for the succparen tree structure
     let mut partial_sums = vec![0.0; lens.len()];
-    
-    // Set partial sums at leaf nodes based on sample differences
     for (leaf_pos, &leaf_node_id) in leaf_ids.iter().enumerate() {
         if leaf_pos < local_a.len() && leaf_pos < local_b.len() {
             let diff = local_a[leaf_pos] - local_b[leaf_pos];
@@ -971,14 +971,12 @@ fn unifrac_succparen_normalized(
         }
     }
     
-    // Propagate partial sums up the tree using postorder traversal
     for &node in post {
         for &child in &kids[node] {
             partial_sums[node] += partial_sums[child];
         }
     }
     
-    // Calculate final distance by summing absolute values weighted by branch lengths
     let mut dist = 0.0;
     for (i, &len) in lens.iter().enumerate() {
         let val = partial_sums[i];
@@ -988,7 +986,7 @@ fn unifrac_succparen_normalized(
     dist
 }
 
-/// Pairwise UniFrac function (unweighted)
+/// Fast unweighted UniFrac using bit masks
 fn unifrac_pair(
     post: &[usize],
     kids: &[Vec<usize>],
@@ -1036,6 +1034,7 @@ fn unifrac_pair(
 
 // --- SuccTrav and collect_children code copied from unifrac_bp ---
 
+/// SuccTrav for BalancedParensTree building
 struct SuccTrav<'a> {
     t: &'a NewickTree,
     stack: Vec<(usize, usize, usize)>,
