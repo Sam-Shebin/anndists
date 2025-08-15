@@ -1086,7 +1086,6 @@ fn collect_children<N: succparen::bitwise::ops::NndOne>(
 
 // End of NewDistUniFrac
 
-// End of NewDistUniFrac
 
 /// Build a bitmask for data[i] > 0.0 using AVX2 intrinsics. 
 /// # Safety
