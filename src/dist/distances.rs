@@ -960,17 +960,17 @@ pub struct NewDistUniFrac {
 impl NewDistUniFrac {
     /// Build NewDistUniFrac from Newick string and feature names
     pub fn new(newick_str: &str, weighted: bool, feature_names: Vec<String>) -> Result<Self> {
-        // 1. Parse Newick string to NewickTree (same as unifrac_bp)
+        // 1. Parse Newick string
         let t: NewickTree = one_from_string(newick_str)
             .map_err(|e| anyhow!("Failed to parse Newick string: {}", e))?;
 
-        // 2. Create lens vector, and build BalancedParensTree via SuccTrav (same as unifrac_bp)
+        // 2. Build BalancedParensTree via SuccTrav
         let mut lens = Vec::<f32>::new();
         let trav = SuccTrav::new(&t, &mut lens);
         let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
             BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
 
-        // 3. Collect children and postorder nodes (same as unifrac_bp)
+        // 3. Collect children and postorder
         let total = bp.len() + 1;
         lens.resize(total, 0.0);
         let mut kids = vec![Vec::<usize>::new(); total];
@@ -988,10 +988,7 @@ impl NewDistUniFrac {
             }
         }
         
-        // Extract leaf names using newick crate only (no phylotree dependency)
-        // Match BP IDs to Newick node IDs to get names in correct BP order
-        // Extract leaf names from the newick string directly
-        // This avoids needing to understand newick Node internal structure
+        // Extract leaf names using the helper function (phylotree-free)
         let leaf_names_from_newick = extract_leaf_names_from_newick_string(newick_str)?;
         
         // Use extracted names if available, otherwise fall back to dummy names
@@ -1003,14 +1000,14 @@ impl NewDistUniFrac {
             }
         }
 
-        // 5. Create taxon-name → leaf-index mapping (same as unifrac_bp)
+        // 5. Build taxon-name → leaf-index map
         let t2leaf: HashMap<&str, usize> = leaf_nm
             .iter()
             .enumerate()
             .map(|(i, n)| (n.as_str(), i))
             .collect();
 
-        // 6. Map feature_names to leaf_ids using the unifrac_bp pattern
+        // 6. Map feature_names to leaf_ids
         let mut mapped_leaf_ids = Vec::with_capacity(feature_names.len());
         for fname in &feature_names {
             if let Some(&leaf_pos) = t2leaf.get(fname.as_str()) {
