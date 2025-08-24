@@ -2547,7 +2547,7 @@ mod tests {
         let identical_distance = new_dist.eval(&vec![1.0, 0.0, 0.0, 0.0], &vec![1.0, 0.0, 0.0, 0.0]);
         assert!(identical_distance.abs() < 1e-6, "Identical samples should have distance ~0, got {}", identical_distance);
         
-        println!("\n✅ NewDistUniFrac properties validation passed!");
+        println!("\nNewDistUniFrac properties validation passed!");
     }
 
     /// Test NewDistUniFrac with manually calculated expected values for mathematical correctness
@@ -2699,10 +2699,10 @@ mod tests {
         }
         
         if all_passed {
-            println!("\n✅ All ground truth validation tests passed within tolerance of {}!", tolerance);
+            println!("\nAll ground truth validation tests passed within tolerance of {}!", tolerance);
             println!("NewDistUniFrac matches the ground truth values from test_truth.txt! 🚀");
         } else {
-            panic!("❌ Ground truth validation failed! NewDistUniFrac results don't match test_truth.txt values");
+            panic!("Ground truth validation failed! NewDistUniFrac results don't match test_truth.txt values");
         }
     }
 
@@ -2826,7 +2826,7 @@ mod tests {
         }
         
         // Validate basic properties instead of comparing to DistUniFrac
-        println!("\n✅ NewDistUniFrac successfully processed {} sample pairs from mouse gut data!", test_count);
+        println!("\nNewDistUniFrac successfully processed {} sample pairs from mouse gut data!", test_count);
         println!("Distance range: {:.6} to {:.6}", 
                  distances_calculated.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
                  distances_calculated.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)));
@@ -3448,7 +3448,7 @@ mod tests {
         let distance_trait: &dyn Distance<f32> = &dist_unifrac;
         
         if samples.len() >= 4 {
-            println!("🔹 Direct Distance Trait Usage:");
+            println!("Direct Distance Trait Usage:");
             println!("   {} vs {}: {:.6}", sample_names[0], sample_names[1], distance_trait.eval(&samples[0], &samples[1]));
             println!("   {} vs {}: {:.6}", sample_names[0], sample_names[2], distance_trait.eval(&samples[0], &samples[2]));
             println!("   {} vs {}: {:.6}", sample_names[0], sample_names[3], distance_trait.eval(&samples[0], &samples[3]));
@@ -3463,7 +3463,7 @@ mod tests {
             samples: &[Vec<f32>], 
             sample_names: &[String]
         ) {
-            println!("🔹 Generic Function with Distance Trait:");
+            println!(" Generic Function with Distance Trait:");
             if samples.len() >= 4 {
                 println!("   {} vs {}: {:.6}", sample_names[0], sample_names[1], dist.eval(&samples[0], &samples[1]));
                 println!("   {} vs {}: {:.6}", sample_names[0], sample_names[2], dist.eval(&samples[0], &samples[2]));
@@ -3478,7 +3478,7 @@ mod tests {
         
         // METHOD 3: Polymorphic usage - can work with ANY Distance implementation
         fn process_with_any_distance<D: Distance<f32>>(distance_impl: D, data: &[Vec<f32>], names: &[String]) {
-            println!("🔹 Polymorphic Distance Usage:");
+            println!("Polymorphic Distance Usage:");
             if data.len() >= 4 {
                 println!("   {} vs {}: {:.6}", names[0], names[1], distance_impl.eval(&data[0], &data[1]));
                 println!("   {} vs {}: {:.6}", names[0], names[2], distance_impl.eval(&data[0], &data[2]));
