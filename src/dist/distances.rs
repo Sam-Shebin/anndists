@@ -38,7 +38,7 @@ use succparen::{
     tree::{
         balanced_parens::{BalancedParensTree, Node as BpNode},
         traversal::{DepthFirstTraverse, VisitNode},
-        LabelVec, Node,
+        LabelVec, Node, Labels,
     },
 };
 
@@ -850,8 +850,8 @@ fn extract_leaf_names_from_newick_string(newick_str: &str) -> Result<Vec<String>
     // Create a temporary SuccTrav to iterate through nodes
     let mut temp_lens = Vec::<f32>::new();
     let trav = SuccTrav::new(&t, &mut temp_lens);
-    let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
-        BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
+    let bp: BalancedParensTree<LabelVec<usize>, SparseOneNnd> =
+        BalancedParensTree::new_builder(trav, LabelVec::<usize>::new()).build_all();
     
     let total = bp.len() + 1;
     let mut kids = vec![Vec::<usize>::new(); total];
@@ -958,49 +958,91 @@ pub struct NewDistUniFrac {
 }
 
 impl NewDistUniFrac {
-    /// Build NewDistUniFrac from Newick string and feature names
+    /// Build NewDistUniFrac using succparen approach with corrected tree construction
     pub fn new(newick_str: &str, weighted: bool, feature_names: Vec<String>) -> Result<Self> {
         // 1. Parse Newick string
         let t: NewickTree = one_from_string(newick_str)
             .map_err(|e| anyhow!("Failed to parse Newick string: {}", e))?;
 
-        // 2. Build BalancedParensTree via SuccTrav
+        // 2. Build tree structure using succparen-compatible approach
+        // Map Newick nodes to sequential indices (postorder) for succparen compatibility  
+        let mut newick_to_index = HashMap::new();
+        let mut index_counter = 0;
         let mut lens = Vec::<f32>::new();
-        let trav = SuccTrav::new(&t, &mut lens);
-        let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
-            BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
+        
+        // Assign indices in postorder (required for succparen/unifrac_bp pattern)
+        fn assign_postorder_indices(node_id: usize, tree: &NewickTree, 
+                                   mapping: &mut HashMap<usize, usize>, 
+                                   counter: &mut usize, 
+                                   lens: &mut Vec<f32>) {
+            // Process children first (postorder)
+            for &child_id in tree[node_id].children() {
+                assign_postorder_indices(child_id, tree, mapping, counter, lens);
+            }
+            
+            // Assign index to current node
+            mapping.insert(node_id, *counter);
+            
+            // Store branch length
+            if *counter >= lens.len() {
+                lens.resize(*counter + 1, 0.0);
+            }
+            lens[*counter] = tree[node_id].branch().copied().unwrap_or(0.0);
+            
+            *counter += 1;
+        }
+        
+        assign_postorder_indices(t.root(), &t, &mut newick_to_index, &mut index_counter, &mut lens);
 
-        // 3. Collect children and postorder
-        let total = bp.len() + 1;
-        lens.resize(total, 0.0);
-        let mut kids = vec![Vec::<usize>::new(); total];
-        let mut post = Vec::<usize>::with_capacity(total);
-        collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
+        // 3. Build children arrays and postorder (succparen-compatible structure)
+        let total_nodes = index_counter;
+        let mut kids = vec![Vec::<usize>::new(); total_nodes];
+        let mut post = Vec::<usize>::with_capacity(total_nodes);
+        
+        fn build_succparen_structure(node_id: usize, tree: &NewickTree, 
+                                    mapping: &HashMap<usize, usize>,
+                                    kids: &mut [Vec<usize>], 
+                                    post: &mut Vec<usize>) {
+            let current_idx = mapping[&node_id];
+            
+            // Process children in correct order
+            for &child_id in tree[node_id].children() {
+                let child_idx = mapping[&child_id];
+                kids[current_idx].push(child_idx);
+                build_succparen_structure(child_id, tree, mapping, kids, post);
+            }
+            post.push(current_idx);
+        }
+        
+        build_succparen_structure(t.root(), &t, &newick_to_index, &mut kids, &mut post);
 
-        // 4. Extract leaf nodes using succparen only (no phylotree-rs dependencies)
+        // 4. Find leaf nodes using original Newick tree (correct approach)
         let mut leaf_ids = Vec::<usize>::new();
         let mut leaf_nm = Vec::<String>::new();
         
-        // Find leaves using succparen: nodes with no children in kids array
-        for node_id in 0..total {
-            if kids[node_id].is_empty() {
-                leaf_ids.push(node_id);
-            }
-        }
-        
-        // Extract leaf names using the helper function (phylotree-free)
-        let leaf_names_from_newick = extract_leaf_names_from_newick_string(newick_str)?;
-        
-        // Use extracted names if available, otherwise fall back to dummy names
-        for (i, &bp_leaf_id) in leaf_ids.iter().enumerate() {
-            if i < leaf_names_from_newick.len() {
-                leaf_nm.push(leaf_names_from_newick[i].clone());
+        fn find_leaves_recursive(node_id: usize, tree: &NewickTree, 
+                                mapping: &HashMap<usize, usize>,
+                                leaf_ids: &mut Vec<usize>, 
+                                leaf_nm: &mut Vec<String>) {
+            let node = &tree[node_id];
+            
+            if node.children().is_empty() {
+                if let Some(name) = node.data().name.as_ref() {
+                    if let Some(&idx) = mapping.get(&node_id) {
+                        leaf_ids.push(idx);
+                        leaf_nm.push(name.clone());
+                    }
+                }
             } else {
-                leaf_nm.push(format!("L{}", bp_leaf_id));
+                for &child_id in node.children() {
+                    find_leaves_recursive(child_id, tree, mapping, leaf_ids, leaf_nm);
+                }
             }
         }
+        
+        find_leaves_recursive(t.root(), &t, &newick_to_index, &mut leaf_ids, &mut leaf_nm);
 
-        // 5. Build taxon-name → leaf-index map
+        // 5. Create taxon-name → leaf-index mapping
         let t2leaf: HashMap<&str, usize> = leaf_nm
             .iter()
             .enumerate()
@@ -1038,13 +1080,18 @@ impl NewDistUniFrac {
 
 impl Distance<f32> for NewDistUniFrac {
     fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
-        unifrac_succparen_normalized(
+        // Convert to bit vectors for the working unifrac_pair function
+        let a_bits: BitVec<u8, bitvec::order::Lsb0> = va.iter().map(|&x| x > 0.0).collect();
+        let b_bits: BitVec<u8, bitvec::order::Lsb0> = vb.iter().map(|&x| x > 0.0).collect();
+        
+        // Use the proven working unifrac_pair function 
+        unifrac_pair(
             &self.post,
-            &self.kids,
+            &self.kids, 
             &self.lens,
             &self.leaf_ids,
-            va,
-            vb,
+            &a_bits,
+            &b_bits,
         ) as f32
     }
 }
@@ -1064,32 +1111,61 @@ fn unifrac_succparen_normalized(
     // Create presence masks (like unifrac_pair)
     let mut mask = vec![0u8; lens.len()];
     
+    println!("DEBUG: Setting leaf masks:");
     for (leaf_pos, &leaf_node_id) in leaf_ids.iter().enumerate() {
         if leaf_pos < va.len() && leaf_pos < vb.len() {
+            let a_val = va[leaf_pos];
+            let b_val = vb[leaf_pos];
+            println!("DEBUG: Leaf {} (BP node {}): A={}, B={}", leaf_pos, leaf_node_id, a_val, b_val);
+            
             if va[leaf_pos] > 0.0 {
                 mask[leaf_node_id] |= A_BIT;
             }
             if vb[leaf_pos] > 0.0 {
                 mask[leaf_node_id] |= B_BIT;
             }
+            
+            println!("DEBUG: Mask for BP node {} = {:02b}", leaf_node_id, mask[leaf_node_id]);
         }
     }
     
-    // Propagate masks up the tree (like unifrac_pair)
+    // Propagate masks up the tree (like unifrac_pair), but only for internal nodes
+    println!("DEBUG: Propagating masks up the tree:");
     for &node in post {
+        // Only propagate for nodes that have children (internal nodes)
+        if kids[node].is_empty() {
+            continue; // Skip leaf nodes in the tree structure
+        }
+        
+        let initial_mask = mask[node];
         for &child in &kids[node] {
+            println!("DEBUG: Node {} gets mask {:02b} from child {}", node, mask[child], child);
             mask[node] |= mask[child];
+        }
+        if initial_mask != mask[node] {
+            println!("DEBUG: Node {} mask changed: {:02b} -> {:02b}", node, initial_mask, mask[node]);
         }
     }
     
     // Calculate shared and union branch lengths (like unifrac_pair)
     let (mut shared, mut union) = (0.0, 0.0);
+    println!("DEBUG: Branch analysis for distance calculation:");
     for &node in post {
         let m = mask[node];
         if m == 0 {
             continue; // No presence in either sample
         }
         let len = lens[node] as f64;
+        let branch_type = if m == A_BIT {
+            "A only"
+        } else if m == B_BIT {
+            "B only" 
+        } else {
+            "Both A&B"
+        };
+        
+        println!("DEBUG: Node {} (len={:.3}): mask={:02b} = {}", node, len, m, branch_type);
+        
         if m == A_BIT || m == B_BIT {
             // Branch present in only one sample
             union += len;
@@ -1099,6 +1175,9 @@ fn unifrac_succparen_normalized(
             union += len;
         }
     }
+    
+    println!("DEBUG: UniFrac calculation - shared: {}, union: {}, distance: {}", 
+             shared, union, if union == 0.0 { 0.0 } else { 1.0 - shared / union });
     
     // Return UniFrac distance: 1.0 - shared/union (like unifrac_pair)
     if union == 0.0 {
@@ -1156,7 +1235,7 @@ fn unifrac_pair(
 
 // --- SuccTrav and collect_children code copied from unifrac_bp ---
 
-/// SuccTrav for BalancedParensTree building
+/// SuccTrav for BalancedParensTree building - stores Newick node ID as label
 struct SuccTrav<'a> {
     t: &'a NewickTree,
     stack: Vec<(usize, usize, usize)>,
@@ -1174,7 +1253,7 @@ impl<'a> SuccTrav<'a> {
 }
 
 impl<'a> DepthFirstTraverse for SuccTrav<'a> {
-    type Label = ();
+    type Label = usize; // Store Newick node ID as label
 
     fn next(&mut self) -> Option<VisitNode<Self::Label>> {
         let (id, lvl, nth) = self.stack.pop()?;
@@ -1187,12 +1266,12 @@ impl<'a> DepthFirstTraverse for SuccTrav<'a> {
             self.lens.resize(id + 1, 0.0);
         }
         self.lens[id] = self.t[id].branch().copied().unwrap_or(0.0);
-        Some(VisitNode::new((), lvl, nth))
+        Some(VisitNode::new(id, lvl, nth)) // Return Newick node ID as label
     }
 }
 
 fn collect_children<N: succparen::bitwise::ops::NndOne>(
-    node: &BpNode<LabelVec<()>, N, &BalancedParensTree<LabelVec<()>, N>>,
+    node: &BpNode<LabelVec<usize>, N, &BalancedParensTree<LabelVec<usize>, N>>,
     kids: &mut [Vec<usize>],
     post: &mut Vec<usize>,
 ) {
