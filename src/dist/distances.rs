@@ -3490,6 +3490,6 @@ mod tests {
         process_with_any_distance(dist_unifrac, &samples, &sample_names);
         
         println!();
-        println!("✅ All methods produce identical results using the Distance trait!");
+        println!("All methods produce identical results using the Distance trait!");
     }
 } // end of module tests
