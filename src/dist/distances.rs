@@ -2505,7 +2505,7 @@ mod tests {
         assert!(d > 0.0); // Should be > 0 since samples have no overlap
     }
 
-    /// Test NewDistUniFrac against the original DistUniFrac implementation for correctness
+    /// Test NewDistUniFrac mathematical properties and correctness
     #[test]
     fn test_new_dist_unifrac_correctness_validation() {
         let _ = env_logger::Builder::from_env(Env::default().default_filter_or("debug"))
@@ -2517,9 +2517,9 @@ mod tests {
         let feature_names = vec!["T1", "T2", "T3", "T4"]
             .into_iter().map(|s| s.to_string()).collect::<Vec<String>>();
 
-        println!("=== Testing NewDistUniFrac vs Original DistUniFrac ===");
+        println!("=== Testing NewDistUniFrac Mathematical Properties ===");
         println!("Tree: {}", newick_str);
-        println!("Note: Different UniFrac implementations may use different normalization approaches");
+        println!("Testing shared/union algorithm implementation");
         
         // Create NewDistUniFrac implementation
         let new_dist = NewDistUniFrac::new(&newick_str, false, feature_names.clone()).unwrap();
@@ -2547,7 +2547,7 @@ mod tests {
         let identical_distance = new_dist.eval(&vec![1.0, 0.0, 0.0, 0.0], &vec![1.0, 0.0, 0.0, 0.0]);
         assert!(identical_distance.abs() < 1e-6, "Identical samples should have distance ~0, got {}", identical_distance);
         
-        println!("\nNewDistUniFrac properties validation passed!");
+        println!("\n✅ NewDistUniFrac mathematical properties validation passed!");
     }
 
     /// Test NewDistUniFrac with manually calculated expected values for mathematical correctness
