@@ -2547,7 +2547,7 @@ mod tests {
         let identical_distance = new_dist.eval(&vec![1.0, 0.0, 0.0, 0.0], &vec![1.0, 0.0, 0.0, 0.0]);
         assert!(identical_distance.abs() < 1e-6, "Identical samples should have distance ~0, got {}", identical_distance);
         
-        println!("\n✅ NewDistUniFrac mathematical properties validation passed!");
+        println!("\nNewDistUniFrac mathematical properties validation passed!");
     }
 
     /// Test NewDistUniFrac with manually calculated expected values for mathematical correctness
@@ -2688,7 +2688,7 @@ mod tests {
             
             let new_distance = new_dist.eval(data_a, data_b) as f64;
             let diff = (new_distance - expected_distance).abs();
-            let status = if diff < tolerance { "✓" } else { "✗" };
+            let status = if diff < tolerance { "PASS" } else { "FAIL" };
             
             if diff >= tolerance {
                 all_passed = false;
@@ -2700,7 +2700,7 @@ mod tests {
         
         if all_passed {
             println!("\nAll ground truth validation tests passed within tolerance of {}!", tolerance);
-            println!("NewDistUniFrac matches the ground truth values from test_truth.txt! 🚀");
+            println!("NewDistUniFrac matches the ground truth values from test_truth.txt!");
         } else {
             panic!("Ground truth validation failed! NewDistUniFrac results don't match test_truth.txt values");
         }
@@ -2835,8 +2835,8 @@ mod tests {
         let self_distance = new_dist.eval(&samples[0], &samples[0]);
         assert!(self_distance.abs() < 1e-6, "Self distance should be ~0, got {}", self_distance);
         
-        println!("Self-distance validation: ✓ (got {:.10})", self_distance);
-        println!("Mouse gut microbiome data processing completed successfully! 🧬");
+        println!("Self-distance validation: PASS (got {:.10})", self_distance);
+        println!("Mouse gut microbiome data processing completed successfully!");
     }
 
     // ============================================================================
@@ -3054,11 +3054,11 @@ mod tests {
         // Read tree file
         let newick_str = match fs::read_to_string(tree_file) {
             Ok(content) => {
-                println!("✓ Successfully read tree file: {} characters", content.len());
+                println!("Successfully read tree file: {} characters", content.len());
                 content.trim().to_string()
             }
             Err(e) => {
-                println!("✗ Error reading tree file: {}", e);
+                println!("Error reading tree file: {}", e);
                 return;
             }
         };
@@ -3069,11 +3069,11 @@ mod tests {
         // Read counts file
         let data_content = match fs::read_to_string(counts_file) {
             Ok(content) => {
-                println!("✓ Successfully read counts file: {} characters", content.len());
+                println!("Successfully read counts file: {} characters", content.len());
                 content
             }
             Err(e) => {
-                println!("✗ Error reading counts file: {}", e);
+                println!("Error reading counts file: {}", e);
                 return;
             }
         };
@@ -3081,7 +3081,7 @@ mod tests {
         // Parse counts file
         let lines: Vec<&str> = data_content.lines().collect();
         if lines.is_empty() {
-            println!("✗ Counts file is empty");
+            println!("Counts file is empty");
             return;
         }
         
@@ -3138,16 +3138,16 @@ mod tests {
         let (feature_names, samples, sample_names) = parse_counts_format(&lines);
         
         if feature_names.is_empty() {
-            println!("✗ No feature names found");
+            println!("No feature names found");
             return;
         }
         
         if samples.is_empty() {
-            println!("✗ No valid samples found");
+            println!("No valid samples found");
             return;
         }
         
-        println!("✓ Found {} features and {} samples", feature_names.len(), samples.len());
+        println!("Found {} features and {} samples", feature_names.len(), samples.len());
         println!("Features (first 10): {:?}", 
                  if feature_names.len() > 10 { &feature_names[..10] } else { &feature_names });
         println!("Samples: {:?}", sample_names);
@@ -3156,13 +3156,13 @@ mod tests {
         println!("\nCreating NewDistUniFrac instance...");
         let dist_unifrac = match NewDistUniFrac::new(&newick_str, false, feature_names.clone()) {
             Ok(unifrac) => {
-                println!("✓ NewDistUniFrac created successfully!");
+                println!("NewDistUniFrac created successfully!");
                 println!("  - Weighted: {}", unifrac.weighted);
                 println!("  - Features: {}", unifrac.num_features());
                 unifrac
             }
             Err(e) => {
-                println!("✗ Error creating NewDistUniFrac: {}", e);
+                println!("Error creating NewDistUniFrac: {}", e);
                 println!("\nTroubleshooting tips:");
                 println!("1. Check that feature names in data match leaf names in tree exactly");
                 println!("2. Tree format should be valid Newick");
@@ -3196,7 +3196,7 @@ mod tests {
             assert!(self_distance.abs() < 1e-6, "Self-distance should be ~0");
         }
         
-        println!("\n✓ Mouse gut microbiome UniFrac analysis completed successfully!");
+        println!("\nMouse gut microbiome UniFrac analysis completed successfully!");
     }
 
     #[test]
